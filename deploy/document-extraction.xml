@@ -1,0 +1,16 @@
+<service>
+  <id>document-extraction-api</id>
+  <name>Document Extraction API</name>
+  <description>Internal document extraction HTTP service</description>
+  <executable>%BASE%\..\.venv\Scripts\python.exe</executable>
+  <arguments>-m document_extraction_api</arguments>
+  <workingdirectory>%BASE%\..</workingdirectory>
+  <startmode>Automatic</startmode>
+  <stoptimeout>30 sec</stoptimeout>
+  <onfailure action="restart" delay="30 sec"/>
+  <logpath>%BASE%\..\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>5120</sizeThreshold>
+    <keepFiles>3</keepFiles>
+  </log>
+</service>
