@@ -477,6 +477,8 @@ let listToken = 0;
 let session = 0;
 let dashToken = 0;
 let techToken = 0;
+// 詳細を開く要求ごとの番号。詳細・元ファイル・技術情報の応答は、この番号が今のものだけを描く
+let detailGen = 0;
 let current = null;
 let blobUrl = null;
 // 項目名・タスクIDは任意の文字（constructor など）なので、Object ではなく Map で引く
@@ -618,7 +620,7 @@ const iso = (date) => date.toISOString();
 
 // ---------- 入口 ----------
 function showLogin(message) {
-  session++; listToken++; dashToken++; techToken++;
+  session++; listToken++; dashToken++; techToken++; detailGen++;
   current = null;
   key = null;
   saveKey(null);
@@ -629,10 +631,13 @@ function showLogin(message) {
   $("key").focus();
 }
 
+// 入れたキーで画面を開く。後から別のキーを入れ直していたら、成功も失敗も捨てて false を返す
 async function start() {
   const mine = ++session;
-  const all = await json("/api/v1/summary");
-  if (mine !== session) return;
+  let all;
+  try { all = await json("/api/v1/summary"); }
+  catch (error) { if (mine !== session) return false; throw error; }
+  if (mine !== session) return false;
   $("login").hidden = true;
   $("app").hidden = false;
   $("site").textContent = all.site_name;
@@ -648,6 +653,7 @@ async function start() {
   }
   route();
   await loadDashboard();
+  return true;
 }
 
 // ---------- ダッシュボード ----------
@@ -903,7 +909,7 @@ function route() {
   $("dash").hidden = Boolean(match);
   $("detail").hidden = !match;
   if (match) openDetail(match[1]);
-  else { current = null; clearFile(); }
+  else { detailGen++; current = null; clearFile(); }
 }
 
 function clearFile() {
@@ -917,16 +923,17 @@ async function openDetail(jobId) {
   $("detail-body").hidden = true;
   $("detail-loading").hidden = false;
   clearFile();
-  techToken++;
+  current = null;
+  const gen = ++detailGen;
   const mine = session;
-  const stale = () => mine !== session || location.hash !== `#job=${jobId}`;
+  const live = () => gen === detailGen && mine === session && location.hash === `#job=${jobId}`;
   let job;
   try { job = await json(jobPath(jobId, "detail")); }
   catch (error) {
-    if (stale()) return;
+    if (!live()) return;
     $("detail-loading").hidden = true; showError($("detail-error"), error); return;
   }
-  if (stale()) return;
+  if (!live()) return;
   $("detail-loading").hidden = true;
   current = job;
   $("d-name").textContent = job.file_name ?? "（名前なし）";
@@ -942,7 +949,7 @@ async function openDetail(jobId) {
   $("tech").open = false;
   $("tech-view").replaceChildren();
   $("detail-body").hidden = false;
-  loadFile(job);
+  loadFile(job, live);
 }
 
 function renderBanner(job) {
@@ -1153,23 +1160,25 @@ function codeBlock(text) {
 async function showTech(load) {
   const box = $("tech-view");
   const token = ++techToken;
+  const gen = detailGen;
+  const live = () => token === techToken && gen === detailGen;
   box.replaceChildren(el("div", "読み込み中…", "muted"));
   try {
     const nodes = await load();
-    if (token === techToken) box.replaceChildren(...nodes);
+    if (live()) box.replaceChildren(...nodes);
   } catch (error) {
-    if (token !== techToken) return;
+    if (!live()) return;
     if (error instanceof Unauthorized) { showLogin("キーが正しくありません。入れ直してください。"); return; }
     box.replaceChildren(el("div", "読み込めませんでした：" + error.message, "muted"));
   }
 }
 
-async function loadFile(job) {
+async function loadFile(job, live) {
   const viewer = $("viewer");
   viewer.replaceChildren(el("p", "読み込み中…"));
   try {
     const blob = await (await call(jobPath(job.job_id, "file"))).blob();
-    if (current !== job) return;
+    if (!live()) return;
     blobUrl = URL.createObjectURL(blob);
     if (blob.type === "application/pdf") {
       const frame = el("iframe");
@@ -1185,7 +1194,7 @@ async function loadFile(job) {
       viewer.replaceChildren(el("p", "この種類のファイル（TIFF など）はブラウザで表示できません。ダウンロードして開いてください。"));
     }
   } catch (error) {
-    if (current !== job) return;
+    if (!live()) return;
     if (error instanceof Unauthorized) { showLogin("キーが正しくありません。入れ直してください。"); return; }
     viewer.replaceChildren(el("p", "元のファイルを読み込めませんでした：" + error.message));
   }
@@ -1196,15 +1205,15 @@ $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   key = $("key").value.trim();
   try {
-    await start();
-    saveKey(key);
+    if (await start()) saveKey(key);
   } catch (error) {
     if (error instanceof Unauthorized) showLogin("キーが正しくありません。");
     else $("login-error").textContent = "読み込めませんでした：" + error.message;
   }
 });
 $("logout").addEventListener("click", () => { history.replaceState(null, "", location.pathname); showLogin(); });
-$("refresh").addEventListener("click", () => current ? openDetail(current.job_id) : loadDashboard());
+// 詳細では、表示中のジョブではなく URL のジョブを開き直す（別のジョブへ移った直後に押しても取り違えない）
+$("refresh").addEventListener("click", () => location.hash.startsWith("#job=") ? route() : loadDashboard());
 $("period").addEventListener("change", () => {
   const custom = $("period").value === "custom";
   $("range").hidden = !custom;
