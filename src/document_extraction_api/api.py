@@ -18,9 +18,9 @@ from fastapi.responses import JSONResponse
 from . import db
 from .auth import UPLOAD_PATH, AuthMiddleware
 from .claude import Extractor
-from .processes import Process, ProcessRegistry
+from .processes import Process, ProcessRegistry, write_snapshot
 from .settings import Settings
-from .worker import INPUT_FILE, Worker, job_dir
+from .worker import INPUT_FILE, PROCESS_DIR, Worker, job_dir
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def create_app(
 ):
     store = db.JobStore(settings.data_dir / "jobs.sqlite3")
     store.initialize()
-    worker = Worker(settings, store, registry, extractor)
+    worker = Worker(settings, store, extractor)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -139,6 +139,7 @@ def _accept(
 
         def place_file() -> None:
             directory.mkdir(parents=True)
+            write_snapshot(process, directory / PROCESS_DIR)
             os.replace(temp, directory / INPUT_FILE)
 
         try:

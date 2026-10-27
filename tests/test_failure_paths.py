@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from conftest import (
 from PIL import Image
 
 from document_extraction_api import db, render_worker
+from document_extraction_api import worker as worker_module
 from document_extraction_api.__main__ import InstanceLock, serve
 from document_extraction_api.claude import ClaudeUnavailable
 from document_extraction_api.render import render_pages, run_with_timeout
@@ -68,11 +70,61 @@ async def test_01_next_jobs_run_after_exception_and_timeout(settings):
         finally:
             task.cancel()
     assert [s["error"]["code"] if s["error"] else s["status"] for s in statuses] == [
-        "internal_error",
+        "claude_error",
         "job_timeout",
         "claude_timeout",
         "succeeded",
     ]
+
+
+async def test_01b_repeated_error_before_sending_ends_as_unreadable_file(settings, monkeypatch):
+    extractor = FakeExtractor()
+    app = make_app(settings, extractor, max_attempts=2)
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+
+    def broken_render(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(worker_module, "render_pages", broken_render)
+    await run_one(app)
+    assert store.get(job_id).status == db.QUEUED  # 1回目はやり直す
+    await run_one(app)
+    job = store.get(job_id)
+    assert job.status == db.FAILED
+    assert job.error == {"code": "unreadable_file", "attempts": 2}
+    assert extractor.calls == []
+
+
+async def test_01c_job_that_cannot_be_finalized_does_not_stop_others(settings, monkeypatch):
+    app = make_app(settings, FakeExtractor(claude_message(GOOD), claude_message(GOOD)))
+    store = fastapi_app(app).state.store
+    worker = fastapi_app(app).state.worker
+    async with client(app) as http:
+        first = (await submit(http, content=png_bytes((1, 0, 0)))).json()["job_id"]
+        second = (await submit(http, content=png_bytes((2, 0, 0)))).json()["job_id"]
+
+    original = worker._finalize
+
+    def finalize(job, raw, process=None):
+        if job.id == first:
+            raise OSError("disk I/O error")
+        return original(job, raw, process)
+
+    monkeypatch.setattr(worker, "_finalize", finalize)
+    task = asyncio.create_task(worker.run())
+    try:
+        async with asyncio.timeout(15):
+            while store.get(second).status != db.SUCCEEDED:
+                await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+    assert store.get(first).status == db.PROCESSING  # 応答は保存済み。次の立て直しで確定する
+
+    monkeypatch.setattr(worker, "_finalize", original)
+    worker.recover()
+    assert store.get(first).status == db.SUCCEEDED
 
 
 # 2. 再起動・停止・DB障害で、ジョブが消えない、重複しない、止まったままにならない。
@@ -146,6 +198,24 @@ async def test_02d_worker_survives_database_errors(settings, monkeypatch):
                 await asyncio.sleep(0.1)
     finally:
         task.cancel()
+
+
+async def test_02e_job_keeps_the_process_it_was_accepted_with(settings, processes_dir):
+    app = make_app(settings, FakeExtractor())
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+    version = store.get(job_id).process_version
+
+    # 受け付けた後に処理を消して再起動しても、受け付けたときの版で読む
+    shutil.rmtree(processes_dir / "site_a" / "typed")
+    extractor = FakeExtractor(claude_message(GOOD))
+    restarted = make_app(settings, extractor)
+    await run_one(restarted)
+    job = store.get(job_id)
+    assert job.status == db.SUCCEEDED
+    assert job.process_version == version
+    assert extractor.calls[0]["prompt"] == "全部読む"
 
 
 # 3. 認証のない要求に、アップロードの受付枠やメモリを使わせない（healthなどのパスも含む）。

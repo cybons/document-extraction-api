@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -7,14 +8,18 @@ from conftest import (
     FakeExtractor,
     claude_message,
     client,
+    fastapi_app,
     make_app,
     pdf_bytes,
     run_one,
     submit,
+    write_process,
 )
 
+from document_extraction_api import db
 from document_extraction_api.claude import ClaudeUnavailable
 from document_extraction_api.processes import load_processes
+from document_extraction_api.worker import PROCESS_DIR, RESPONSE_FILE, job_dir
 
 pytestmark = pytest.mark.anyio
 
@@ -74,6 +79,56 @@ async def test_check_of_the_process_marks_review(settings):
     result = await _run(settings, {"issued": None, "total": None, "lines": []})
     assert result["status"] == "needs_review"
     assert result["issues"] == [{"path": "total", "raw": None, "message": "合計がない"}]
+
+
+async def test_check_that_raises_marks_review_instead_of_failing(settings, processes_dir):
+    write_process(
+        processes_dir,
+        "site_a",
+        "broken",
+        """
+        from document_extraction_api.fields import Record, Text
+
+        TASK_ID = "broken.extract"
+
+
+        class Output(Record):
+            title: Text
+
+
+        def check(data):
+            return 1 / 0
+        """,
+    )
+    result = await _run(settings, {"title": "A"}, task_id="broken.extract")
+    assert result["status"] == "needs_review"
+    assert result["data"] == {"title": "A"}
+    assert result["issues"] == [
+        {"path": "", "raw": None, "message": "check が例外で止まった: ZeroDivisionError"}
+    ]
+
+
+async def test_saved_response_is_kept_when_the_process_cannot_be_loaded(settings, monkeypatch):
+    app = make_app(settings, FakeExtractor(claude_message({"title": "A"})))
+    store = fastapi_app(app).state.store
+    worker = fastapi_app(app).state.worker
+    async with client(app) as http:
+        job_id = (await submit(http, task_id="title.extract")).json()["job_id"]
+
+    def broken_finish(*args, **kwargs):
+        raise OSError("disk I/O error")
+
+    monkeypatch.setattr(store, "finish", broken_finish)
+    await run_one(app)
+    monkeypatch.undo()
+    assert (job_dir(settings, job_id) / RESPONSE_FILE).exists()
+
+    shutil.rmtree(job_dir(settings, job_id) / PROCESS_DIR)
+    worker.recover()
+    job = store.get(job_id)
+    assert job.status == db.NEEDS_REVIEW
+    assert job.data == {"title": "A"}
+    assert job.issues[0]["message"] == "処理の定義を読み込めず、検証していない"
 
 
 async def test_unreadable_values_returned_as_null_are_kept_null(settings):

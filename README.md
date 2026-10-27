@@ -87,11 +87,13 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 
 | 場合 | `error.code` |
 |---|---|
-| ファイルが読めない | `unreadable_file`、`too_many_pages`（`max_pages` を超える）、`too_large`（画像にすると Claude API の要求の上限を超える）、`render_timeout` |
-| Claude が応答しない | `claude_timeout`、`claude_connection_error`、`claude_http_<状態>`、`claude_refused`、`claude_no_response`（中断が `max_attempts` 回続いた）、`job_timeout` |
+| ファイルが読めない | `unreadable_file`（Claude へ送る前の誤りや中断が `max_attempts` 回続いたときも）、`too_many_pages`（`max_pages` を超える）、`too_large`（画像にすると Claude API の要求の上限を超える）、`render_timeout` |
+| Claude が応答しない | `claude_timeout`、`claude_connection_error`、`claude_http_<状態>`、`claude_error`（そのほかの呼び出しの誤り）、`claude_refused`、`claude_no_response`（送った後の中断が `max_attempts` 回続いた）、`job_timeout` |
 | 応答が JSON にならない | `invalid_json`、`response_truncated`（`max_tokens` で途切れた） |
 
-このほか、想定外の例外は `internal_error`、処理の定義が消えたときは `process_not_found` になる。
+想定外の誤りも、起きた段階で上のどれかになる。Claude の応答を保存した後は失敗にしない。
+- 処理の `check` が例外で止まったときは、その旨を `issues` に入れて要確認にする。
+- 処理の定義を読み込めないときは、検証していない応答を `data` に入れて要確認にする。
 
 ## 処理を足す・直す
 
@@ -124,12 +126,13 @@ def check(data: Output) -> list[Issue]:   # 任意。指摘があれば要確認
 - 項目の型は `Text`・`Number`・`Date` を使う。Claude には、どの項目も「書かれている文字」か `null` で書かせ、数値・日付への変換は基盤が行う（[fields.py](src/document_extraction_api/fields.py)）。
   - `Number` は桁区切りのカンマと全角数字を受け付ける。
   - `Date` は西暦（`2026-10-27`、`2026/10/27`、`2026年10月27日`）と令和・平成を受け付ける。
+- 受け付けたジョブは、受け付けたときの処理で読む。処理を直したり消したりしても、待ちのジョブには効かない。
 - 拠点に処理のないタスクは、その拠点では使えない。共通の処理への切り替えはしない。
 - `processes/` にある請求書・納品書の処理は仮の中身。項目とプロンプトは運用前に調整する。
 
 ## 仕組み
 
-- ジョブは SQLite（`data_dir/jobs.sqlite3`）に記録する。ファイルと Claude の生の応答は `data_dir/jobs/<job_id>/` に置く。
+- ジョブは SQLite（`data_dir/jobs.sqlite3`）に記録する。ファイル、受け付けたときの処理の写し、Claude の生の応答は `data_dir/jobs/<job_id>/` に置く。
 - 同時に処理するのは1件。前処理（PDF の画像化、ページの回転、写真の向き、透過の白背景合成）は子プロセスで行い、時間を超えたらプロセスツリーごと終了する。子プロセス自身も制限時間を持つ。
 - ページは長辺 2576px までの PNG にする。スキャンなどで 1.5MB を超えるページは JPEG（品質90）にする。Claude API の上限は、画像1枚 10MB・要求全体 32MB。
 - Claude へ送る前に送信時刻を記録し、受け取った応答は DB より先にディスクへ保存する。処理中のまま止まったジョブは、起動時と手が空いたときに立て直す。

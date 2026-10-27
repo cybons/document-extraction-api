@@ -4,6 +4,9 @@
 - 起動時と手が空いたときに、処理中のまま残ったジョブを立て直す。
   応答が保存済みなら Claude を呼ばずに結果を確定し、まだ送っていなければ待ちに戻す。
 - 1件の例外やタイムアウトで止まらず、次のジョブへ進む。
+- 失敗にするのは、ファイルが読めない、Claude が応答しない、応答が JSON にならない、の3つだけ。
+  想定外の誤りも、起きた段階でこのどれかに入れる。Claude へ送る前の誤りは max_attempts 回まで
+  やり直し、続けば「ファイルが読めない」にする。応答を保存した後は失敗にしない。
 """
 
 import asyncio
@@ -16,7 +19,7 @@ from pathlib import Path
 
 from . import db
 from .claude import ClaudeUnavailable, Extractor
-from .processes import InvalidOutput, Process, ProcessRegistry, validate_output
+from .processes import InvalidOutput, Process, load_snapshot, validate_output
 from .render import RenderError, render_pages
 from .settings import Settings
 
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 RESPONSE_FILE = "response.json"
 INPUT_FILE = "input"
+PROCESS_DIR = "process"
 
 
 def job_dir(settings: Settings, job_id: str) -> Path:
@@ -35,13 +39,11 @@ class Worker:
         self,
         settings: Settings,
         store: db.JobStore,
-        registry: ProcessRegistry,
         extractor: Extractor,
         idle_seconds: float = 5,
     ):
         self.settings = settings
         self.store = store
-        self.registry = registry
         self.extractor = extractor
         self.idle_seconds = idle_seconds
         self.wake = asyncio.Event()
@@ -68,32 +70,45 @@ class Worker:
     def recover(self) -> None:
         """処理中のまま残ったジョブを立て直す（このワーカーが処理していない前提で呼ぶ）。"""
         for job in self.store.processing():
-            response_path = job_dir(self.settings, job.id) / RESPONSE_FILE
-            if response_path.exists():
-                try:
-                    raw = json.loads(response_path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    self.store.finish(job.id, db.FAILED, error=_error("invalid_json"))
-                    continue
-                self._finalize(job, raw)
-            elif job.sent_at is None or job.attempts < self.settings.max_attempts:
-                self.store.requeue(job.id)
-                logger.info("ジョブを待ちに戻した: %s", job.id)
-            else:
-                self.store.finish(
-                    job.id, db.FAILED, error=_error("claude_no_response", job.attempts)
-                )
-                logger.warning("ジョブを失敗にした（応答を得られないまま中断）: %s", job.id)
+            try:
+                self._recover_one(job)
+            except Exception as error:
+                # 1件の誤りで、ほかのジョブの立て直しと処理を止めない。次の機会にやり直す
+                logger.error("ジョブの立て直しに失敗: %s %s", job.id, type(error).__name__)
+
+    def _recover_one(self, job: db.Job) -> None:
+        response_path = job_dir(self.settings, job.id) / RESPONSE_FILE
+        if response_path.exists():
+            try:
+                raw = json.loads(response_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                self.store.finish(job.id, db.FAILED, error=_error("invalid_json"))
+                return
+            self._finalize(job, raw)
+        elif job.attempts < self.settings.max_attempts:
+            self.store.requeue(job.id)
+            logger.info("ジョブを待ちに戻した: %s", job.id)
+        else:
+            # 送る前に止まり続けたならファイルが読めない、送った後なら Claude が応答しない
+            code = "unreadable_file" if job.sent_at is None else "claude_no_response"
+            self.store.finish(job.id, db.FAILED, error=_error(code, job.attempts))
+            logger.warning("ジョブを失敗にした（%s 回中断）: %s %s", job.attempts, job.id, code)
 
     async def process(self, job: db.Job) -> None:
         try:
             await self._process(job)
         except Exception as error:
             logger.error("ジョブの処理中に例外: %s %s", job.id, type(error).__name__)
-            if (job_dir(self.settings, job.id) / RESPONSE_FILE).exists():
-                # 課金済みの応答は保存してある。結果の確定は recover に任せる
-                return
-            await self._finish_safely(job, db.FAILED, error=_error("internal_error"))
+            await asyncio.to_thread(self._recover_safely, job.id)
+
+    def _recover_safely(self, job_id: str) -> None:
+        """例外で止まったジョブを、やり直すか終わらせる。ここで失敗しても recover が拾う。"""
+        try:
+            job = self.store.get(job_id)
+            if job is not None and job.status == db.PROCESSING:
+                self._recover_one(job)
+        except Exception as error:
+            logger.error("ジョブの立て直しに失敗: %s %s", job_id, type(error).__name__)
 
     async def _process(self, job: db.Job) -> None:
         directory = job_dir(self.settings, job.id)
@@ -102,10 +117,7 @@ class Worker:
             await asyncio.to_thread(self._finalize, job, raw)
             return
 
-        process = self.registry.get(job.site, job.task_id)
-        if process is None:
-            await self._finish_safely(job, db.FAILED, error=_error("process_not_found"))
-            return
+        process = await asyncio.to_thread(load_snapshot, job.site, directory / PROCESS_DIR)
         if process.version != job.process_version:
             await asyncio.to_thread(self.store.set_process_version, job.id, process.version)
 
@@ -138,13 +150,21 @@ class Worker:
         except TimeoutError:
             await self._finish_safely(job, db.FAILED, error=_error("job_timeout"))
             return
+        except Exception as error:
+            logger.error("Claude の呼び出しで例外: %s %s", job.id, type(error).__name__)
+            await self._finish_safely(job, db.FAILED, error=_error("claude_error"))
+            return
 
         await asyncio.to_thread(_write_atomic, directory / RESPONSE_FILE, response.raw)
         await asyncio.to_thread(self._finalize, job, response.raw, process)
 
     def _finalize(self, job: db.Job, raw: dict, process: Process | None = None) -> None:
         """保存済みの Claude の応答から結果を確定する。"""
-        process = process or self.registry.get(job.site, job.task_id)
+        if process is None:
+            try:
+                process = load_snapshot(job.site, job_dir(self.settings, job.id) / PROCESS_DIR)
+            except Exception as error:
+                logger.error("処理の写しを読み込めない: %s %s", job.id, type(error).__name__)
         usage = raw.get("usage") or {}
         model = raw.get("model")
         input_tokens = usage.get("input_tokens")
@@ -164,15 +184,22 @@ class Worker:
         if stop_reason == "max_tokens":
             self.store.finish(job.id, db.FAILED, error=_error("response_truncated"), **record)
             return
-        if process is None:
-            self.store.finish(job.id, db.FAILED, error=_error("process_not_found"), **record)
-            return
         text = "".join(
             block.get("text", "") for block in raw.get("content", []) if block.get("type") == "text"
         )
         try:
-            validated = validate_output(process, json.loads(text))
-        except json.JSONDecodeError, InvalidOutput:
+            output = json.loads(text)
+        except json.JSONDecodeError:
+            self.store.finish(job.id, db.FAILED, error=_error("invalid_json"), **record)
+            return
+        if process is None:
+            # 課金済みの結果は捨てない。検証できなかったことを示して要確認にする
+            issue = {"path": "", "raw": None, "message": "処理の定義を読み込めず、検証していない"}
+            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=[issue], **record)
+            return
+        try:
+            validated = validate_output(process, output)
+        except InvalidOutput:
             self.store.finish(job.id, db.FAILED, error=_error("invalid_json"), **record)
             return
         status = db.NEEDS_REVIEW if validated.issues else db.SUCCEEDED

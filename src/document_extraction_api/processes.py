@@ -2,11 +2,15 @@
 
 各フォルダには prompt.md（Claude への指示文）と definition.py を置く。definition.py には
 TASK_ID、出力の形 Output（fields.Record の派生）、任意で check(data) -> list[Issue] を書く。
+
+ジョブを受け付けたときに、処理の中身をジョブのフォルダへ写す（write_snapshot）。ワーカーは
+その写しで処理するので、受け付けた後に処理を直したり消したりしても、そのジョブは受け付けた
+ときの版で読む。
 """
 
 import copy
 import hashlib
-import importlib.util
+import types
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +21,8 @@ from pydantic import BaseModel, ValidationError
 from . import fields
 
 _FIELDS_SOURCE = Path(fields.__file__)
+PROMPT_FILE = "prompt.md"
+DEFINITION_FILE = "definition.py"
 
 
 class ProcessError(Exception):
@@ -33,6 +39,8 @@ class Process:
     check: Callable[[Any], list[fields.Issue]] | None
     schema: dict
     digest: str
+    sources: dict[str, bytes]
+    """読み込んだときの prompt.md と definition.py の中身。"""
 
     @property
     def version(self) -> str:
@@ -72,22 +80,21 @@ def load_processes(root: Path, sites: list[str]) -> ProcessRegistry:
         if not site_dir.is_dir():
             continue
         for task_dir in sorted(p for p in site_dir.iterdir() if p.is_dir()):
-            if (task_dir / "definition.py").exists():
+            if (task_dir / DEFINITION_FILE).exists():
                 processes.append(load_process(site, task_dir))
     return ProcessRegistry(processes)
 
 
 def load_process(site: str, task_dir: Path) -> Process:
-    prompt_path = task_dir / "prompt.md"
-    definition_path = task_dir / "definition.py"
+    prompt_path = task_dir / PROMPT_FILE
+    definition_path = task_dir / DEFINITION_FILE
     if not prompt_path.exists():
-        raise ProcessError(f"{task_dir} に prompt.md がない")
-    module_name = f"_processes.{site}.{task_dir.name}"
-    spec = importlib.util.spec_from_file_location(module_name, definition_path)
-    if spec is None or spec.loader is None:
-        raise ProcessError(f"{definition_path} を読み込めない")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+        raise ProcessError(f"{task_dir} に {PROMPT_FILE} がない")
+    sources = {PROMPT_FILE: prompt_path.read_bytes(), DEFINITION_FILE: definition_path.read_bytes()}
+    # 読んだ中身そのものを実行する（版の計算と写しに使う中身と、実行する中身をそろえる）
+    module = types.ModuleType(f"_processes.{site}.{task_dir.name}")
+    module.__file__ = str(definition_path)
+    exec(compile(sources[DEFINITION_FILE], str(definition_path), "exec"), module.__dict__)
 
     task_id = getattr(module, "TASK_ID", None)
     output = getattr(module, "Output", None)
@@ -98,18 +105,35 @@ def load_process(site: str, task_dir: Path) -> Process:
         raise ProcessError(f"{definition_path} に Output（fields.Record の派生）がない")
 
     digest = hashlib.sha256()
-    for path in (prompt_path, definition_path, _FIELDS_SOURCE):
-        digest.update(path.read_bytes())
+    for source in (sources[PROMPT_FILE], sources[DEFINITION_FILE], _FIELDS_SOURCE.read_bytes()):
+        digest.update(source)
     return Process(
         site=site,
         task_id=task_id,
         name=task_dir.name,
-        prompt=prompt_path.read_text(encoding="utf-8"),
+        prompt=sources[PROMPT_FILE].decode("utf-8"),
         output=output,
         check=check,
         schema=claude_schema(output),
         digest=digest.hexdigest()[:12],
+        sources=sources,
     )
+
+
+def write_snapshot(process: Process, directory: Path) -> None:
+    """処理の中身をジョブのフォルダへ写す。"""
+    target = directory / process.name
+    target.mkdir(parents=True)
+    for name, source in process.sources.items():
+        (target / name).write_bytes(source)
+
+
+def load_snapshot(site: str, directory: Path) -> Process:
+    """write_snapshot で写した処理を読み込む。"""
+    folders = [path for path in directory.iterdir() if path.is_dir()]
+    if len(folders) != 1:
+        raise ProcessError(f"{directory} に処理の写しが1つだけあるはず")
+    return load_process(site, folders[0])
 
 
 def claude_schema(output: type[BaseModel]) -> dict:
@@ -158,7 +182,12 @@ def validate_output(process: Process, raw: Any) -> Validated:
         except ValidationError as again:
             raise InvalidOutput() from again
     if process.check is not None:
-        for issue in process.check(model):
+        try:
+            found = process.check(model)
+        except Exception as error:
+            # check は処理ごとに書くコード。止まっても課金済みの結果は捨てず、要確認にする
+            found = [fields.Issue("", f"check が例外で止まった: {type(error).__name__}")]
+        for issue in found:
             issues.append({"path": issue.path, "raw": None, "message": issue.message})
     return Validated(model.model_dump(mode="json"), issues)
 
