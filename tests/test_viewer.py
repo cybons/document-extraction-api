@@ -4,6 +4,9 @@ import base64
 import hashlib
 import json
 import re
+import sqlite3
+from contextlib import closing
+from dataclasses import replace
 
 import pytest
 from conftest import (
@@ -16,9 +19,13 @@ from conftest import (
     png_bytes,
     run_one,
     submit,
+    write_process,
 )
 
 from document_extraction_api.api import _file_name
+from document_extraction_api.processes import ProcessError, describe_path, load_processes
+from document_extraction_api.settings import SettingsError, parse_settings
+from document_extraction_api.worker import PROCESS_DIR, job_dir
 
 pytestmark = pytest.mark.anyio
 
@@ -314,3 +321,186 @@ async def test_unusual_file_names_are_accepted_and_shown(settings):
     assert stored.startswith("<img src=x onerror=alert(1)>長")
     assert len(stored) == 255
     json.dumps(detail.json(), ensure_ascii=False).encode("utf-8")
+
+
+NAMED_DEFINITION = '''
+"""テスト専用：画面に出す名前を書いた処理。"""
+from pydantic import Field
+
+from document_extraction_api.fields import Date, Number, Record, Text
+
+TASK_ID = "named.extract"
+NAME = "名前付きの帳票"
+
+
+class Line(Record):
+    name: Text = Field(title="品名")
+    quantity: Number = Field(title="数量")
+
+
+class Output(Record):
+    issued: Date = Field(title="発行日")
+    total: Number
+    lines: list[Line] = Field(title="明細")
+'''
+
+
+@pytest.fixture
+def named(settings, processes_dir):
+    write_process(processes_dir, "site_a", "named", NAMED_DEFINITION)
+    sites = dict(settings.sites)
+    sites["site_a"] = replace(sites["site_a"], display_name="親会社")
+    return replace(settings, sites=sites)
+
+
+async def test_names_from_settings_and_process_definition(named):
+    output = {
+        "issued": "令和8年13月1日",
+        "total": "1O",
+        "lines": [{"name": "部品", "quantity": "x"}],
+    }
+    app = make_app(named, FakeExtractor(claude_message(output), claude_message(TITLE)))
+    async with client(app) as http:
+        job_id = (await submit(http, task_id="named.extract")).json()["job_id"]
+        await run_one(app)
+        await submit(http, task_id="title.extract", content=png_bytes((5, 5, 5)))
+        await run_one(app)
+        summary = (await http.get("/api/v1/summary", headers=A)).json()
+        listed = (await http.get("/api/v1/jobs", headers=A)).json()["jobs"]
+        detail = (await http.get(f"/api/v1/jobs/{job_id}/detail", headers=A)).json()
+        other = (await http.get("/api/v1/summary", headers=B)).json()
+    assert summary["site_name"] == "親会社"
+    assert other["site_name"] == "site_b"  # 名前を書いていなければ設定のキー名
+    names = {task["task_id"]: task["task_name"] for task in summary["tasks"]}
+    assert names == {"named.extract": "名前付きの帳票", "title.extract": None}
+    item = next(job for job in listed if job["job_id"] == job_id)
+    assert item["task_name"] == "名前付きの帳票"
+    fields = {issue["field"]: issue["message"] for issue in item["issues"]}
+    assert fields["発行日"] == "日付として読めない"
+    assert fields["total"] == "数値として読めない"  # 名前のない項目はキーのまま
+    assert fields["明細 1行目の数量"] == "数値として読めない"
+    assert detail["task_name"] == "名前付きの帳票"
+    assert detail["labels"] == {
+        "issued": "発行日",
+        "lines": "明細",
+        "lines[].name": "品名",
+        "lines[].quantity": "数量",
+    }
+    assert len(detail["issue_fields"]) == len(detail["issues"])
+    assert "明細 1行目の数量" in detail["issue_fields"]
+
+
+async def test_names_are_those_of_the_process_the_job_was_accepted_with(named, processes_dir):
+    app = make_app(
+        named, FakeExtractor(claude_message({"issued": None, "total": None, "lines": []}))
+    )
+    async with client(app) as http:
+        job_id = (await submit(http, task_id="named.extract")).json()["job_id"]
+        await run_one(app)
+    # 受け付けた後に処理の名前を変えても、そのジョブには受け付けたときの名前を出す
+    renamed = NAMED_DEFINITION.replace("名前付きの帳票", "変えた名前").replace("発行日", "日付")
+    (processes_dir / "site_a" / "named" / "definition.py").write_text(renamed, encoding="utf-8")
+    app = make_app(named, FakeExtractor())
+    async with client(app) as http:
+        detail = (await http.get(f"/api/v1/jobs/{job_id}/detail", headers=A)).json()
+    assert detail["task_name"] == "名前付きの帳票"
+    assert detail["labels"]["issued"] == "発行日"
+
+
+async def test_detail_still_works_when_the_process_copy_cannot_be_loaded(jobs, settings):
+    http, ids = jobs
+    snapshot = job_dir(settings, ids["review"]) / PROCESS_DIR
+    for path in snapshot.rglob("definition.py"):
+        path.write_text("raise RuntimeError('壊れた')", encoding="utf-8")
+    response = await http.get(f"/api/v1/jobs/{ids['review']}/detail", headers=A)
+    listed = await http.get("/api/v1/jobs", headers=A)
+    assert response.status_code == 200
+    assert response.json()["task_name"] is None
+    assert response.json()["labels"] == {}
+    assert listed.status_code == 200
+
+
+async def test_list_filters_by_several_statuses(jobs):
+    http, ids = jobs
+    response = await http.get(
+        "/api/v1/jobs", headers=A, params=[("status", "failed"), ("status", "needs_review")]
+    )
+    assert [job["job_id"] for job in response.json()["jobs"]] == [ids["failed"], ids["review"]]
+
+
+async def test_summary_by_task(jobs):
+    http, ids = jobs
+    summary = (
+        await http.get("/api/v1/summary", headers=A, params={"task_id": "typed.extract"})
+    ).json()
+    assert summary["jobs"] == 2
+    assert [task["task_id"] for task in summary["tasks"]] == ["typed.extract"]
+    assert summary["tasks"][0]["status_counts"]["failed"] == 1
+    assert summary["tasks"][0]["status_counts"]["needs_review"] == 1
+
+
+async def test_summary_days_are_cut_at_the_given_offset(jobs, settings):
+    http, ids = jobs
+    # 日本時間で 10/27 0:30（UTC では 10/26 15:30）と 10/27 23:30（UTC では 10/27 14:30）
+    with closing(sqlite3.connect(settings.data_dir / "jobs.sqlite3")) as conn, conn:
+        conn.execute(
+            "UPDATE jobs SET created_at=? WHERE id=?",
+            ("2026-10-26T15:30:00.000000+00:00", ids["title"]),
+        )
+        conn.execute(
+            "UPDATE jobs SET created_at=? WHERE id IN (?, ?)",
+            ("2026-10-27T14:30:00.000000+00:00", ids["review"], ids["failed"]),
+        )
+    tokyo = (await http.get("/api/v1/summary", headers=A, params={"utc_offset": "+09:00"})).json()
+    utc = (await http.get("/api/v1/summary", headers=A)).json()
+    assert [(day["date"], day["jobs"]) for day in tokyo["days"]] == [("2026-10-27", 3)]
+    assert [(day["date"], day["jobs"]) for day in utc["days"]] == [
+        ("2026-10-26", 1),
+        ("2026-10-27", 2),
+    ]
+    day = tokyo["days"][0]
+    assert day["status_counts"] == {
+        "queued": 0,
+        "processing": 0,
+        "succeeded": 1,
+        "needs_review": 1,
+        "failed": 1,
+    }
+    assert day["cost_usd"] == pytest.approx(0.024)
+
+
+@pytest.mark.parametrize("offset", ["9", "+9:00", "+09:60", "+15:00", "JST", "+09:00:00"])
+async def test_invalid_utc_offset(settings, offset):
+    app = make_app(settings, FakeExtractor())
+    async with client(app) as http:
+        response = await http.get("/api/v1/summary", headers=A, params={"utc_offset": offset})
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("path", "described"),
+    [
+        ("total_amount", "合計金額"),
+        ("items[1].quantity", "明細 2行目の数量"),
+        ("items[0].unknown", "明細 1行目のunknown"),
+        ("other", "other"),
+        ("tags[2]", "tags 3行目"),
+        ("", ""),
+    ],
+)
+def test_describe_path(path, described):
+    labels = {"total_amount": "合計金額", "items": "明細", "items[].quantity": "数量"}
+    assert describe_path(path, labels) == described
+
+
+def test_invalid_names_are_rejected(tmp_path):
+    write_process(tmp_path, "s", "bad", NAMED_DEFINITION.replace('"名前付きの帳票"', "1"))
+    with pytest.raises(ProcessError):
+        load_processes(tmp_path, ["s"])
+    raw = {
+        "data_dir": "d",
+        "processes_dir": "p",
+        "sites": {"s": {"name": "", "claude_api_key": "k", "client_key_sha256": ["a"]}},
+    }
+    with pytest.raises(SettingsError):
+        parse_settings(raw, tmp_path)

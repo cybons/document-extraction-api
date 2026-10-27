@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import shutil
 import unicodedata
 import uuid
@@ -21,7 +22,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from . import db
 from .auth import UPLOAD_PATH, AuthMiddleware
 from .claude import Extractor
-from .processes import Process, ProcessRegistry, write_snapshot
+from .processes import Process, ProcessRegistry, describe_path, load_snapshot, write_snapshot
 from .settings import Settings
 from .worker import INPUT_FILE, PROCESS_DIR, RESPONSE_FILE, Worker, job_dir
 
@@ -37,6 +38,7 @@ _MEDIA_TYPES = {
 }
 _STATUSES = (db.QUEUED, db.PROCESSING, db.SUCCEEDED, db.NEEDS_REVIEW, db.FAILED)
 MAX_FILE_NAME = 255
+_UTC_OFFSET = re.compile(r"([+-])(\d{2}):(\d{2})")
 MAX_LIST_LIMIT = 200
 # 閲覧用の応答。ジョブのファイルを直接開かれても、中身を動かさない
 _VIEW_HEADERS = {
@@ -90,6 +92,18 @@ def _instant(value: str | None) -> str | None:
     if moment.tzinfo is None:
         raise ValueError("時差がない")
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _offset_minutes(value: str) -> int:
+    """+09:00 のような時差を分にする。読めなければ ValueError。"""
+    match = _UTC_OFFSET.fullmatch(value)
+    if match is None:
+        raise ValueError(value)
+    sign, hours, minutes = match.groups()
+    total = int(hours) * 60 + int(minutes)
+    if total > 14 * 60 or int(minutes) >= 60:
+        raise ValueError(value)
+    return total if sign == "+" else -total
 
 
 def create_app(
@@ -156,6 +170,23 @@ def create_app(
             worker.wake.set()
         return JSONResponse({"job_id": job.id, "status": job.status}, status_code=202)
 
+    names: dict[str, tuple[str | None, dict[str, str]]] = {}
+
+    def process_names(job: db.Job) -> tuple[str | None, dict[str, str]]:
+        """受け付けたときの処理に書いた帳票の名前と項目の名前。読めなければ (None, {})。"""
+        if job.process_version not in names:
+            try:
+                process = load_snapshot(job.site, job_dir(settings, job.id) / PROCESS_DIR)
+            except Exception:
+                # 名前は表示のためだけのもの。読めなくても閲覧は止めない（覚えずに次に読み直す）
+                return None, {}
+            names[job.process_version] = (process.display_name, process.labels or {})
+        return names[job.process_version]
+
+    def task_name(site: str, task_id: str) -> str | None:
+        process = registry.get(site, task_id)
+        return process.display_name if process is not None else None
+
     async def own_job(request: Request, job_id: str) -> db.Job | None:
         """要求のキーの拠点のジョブだけを返す。ほかの拠点のジョブは、ないものとして扱う。"""
         job = await anyio.to_thread.run_sync(store.get, job_id)
@@ -178,7 +209,7 @@ def create_app(
         request: Request,
         start: Annotated[str | None, Query(alias="from")] = None,
         end: Annotated[str | None, Query(alias="to")] = None,
-        status: str | None = None,
+        status: Annotated[list[str] | None, Query()] = None,
         task_id: str | None = None,
         before: str | None = None,
         limit: Annotated[int, Query(ge=1, le=MAX_LIST_LIMIT)] = 50,
@@ -187,22 +218,25 @@ def create_app(
             start, end = _instant(start), _instant(end)
         except ValueError:
             return _error(400, "invalid_request", "from・to は時差の付いた ISO 8601 の時刻にする")
-        if status is not None and status not in _STATUSES:
+        if status and any(value not in _STATUSES for value in status):
             return _error(400, "invalid_request", "status が正しくない")
-        jobs = await anyio.to_thread.run_sync(
-            lambda: store.list_jobs(
+
+        def listed() -> list[tuple[db.Job, tuple[str | None, dict[str, str]]]]:
+            jobs = store.list_jobs(
                 request.state.site,
                 start=start,
                 end=end,
-                status=status,
+                statuses=status,
                 task_id=task_id,
                 before=before,
                 limit=limit,
             )
-        )
+            return [(job, process_names(job)) for job in jobs]
+
+        jobs = await anyio.to_thread.run_sync(listed)
         return {
-            "jobs": [_list_item(job) for job in jobs],
-            "next_before": jobs[-1].id if len(jobs) == limit else None,
+            "jobs": [_list_item(job, *info) for job, info in jobs],
+            "next_before": jobs[-1][0].id if len(jobs) == limit else None,
         }
 
     @app.get("/api/v1/summary")
@@ -210,22 +244,37 @@ def create_app(
         request: Request,
         start: Annotated[str | None, Query(alias="from")] = None,
         end: Annotated[str | None, Query(alias="to")] = None,
+        task_id: str | None = None,
+        utc_offset: str = "+00:00",
     ):
         try:
             start, end = _instant(start), _instant(end)
         except ValueError:
             return _error(400, "invalid_request", "from・to は時差の付いた ISO 8601 の時刻にする")
+        try:
+            offset = _offset_minutes(utc_offset)
+        except ValueError:
+            return _error(400, "invalid_request", "utc_offset は +09:00 のように書く")
+        site = request.state.site
         result = await anyio.to_thread.run_sync(
-            lambda: store.summary(request.state.site, start=start, end=end)
+            lambda: store.summary(
+                site, start=start, end=end, task_id=task_id, utc_offset_minutes=offset
+            )
         )
-        return {"site": request.state.site, **result}
+        for task in result["tasks"]:
+            task["task_name"] = task_name(site, task["task_id"])
+        return {"site": site, "site_name": settings.sites[site].display_name or site, **result}
 
     @app.get("/api/v1/jobs/{job_id}/detail")
     async def job_detail(request: Request, job_id: str):
         job = await own_job(request, job_id)
         if job is None:
             return job_not_found()
+        display_name, labels = await anyio.to_thread.run_sync(process_names, job)
         return _job_response(job) | {
+            "task_name": display_name,
+            "labels": labels,
+            "issue_fields": [_issue_field(issue, labels) for issue in job.issues],
             "file_name": job.file_name,
             "file_sha256": job.file_sha256,
             "requested_model": job.requested_model,
@@ -358,10 +407,16 @@ def _job_response(job: db.Job) -> dict:
     }
 
 
-def _list_item(job: db.Job) -> dict:
+def _issue_field(issue: object, labels: dict[str, str]) -> str | None:
+    path = issue.get("path") if isinstance(issue, dict) else None
+    return describe_path(path, labels) if isinstance(path, str) else None
+
+
+def _list_item(job: db.Job, task_name: str | None, labels: dict[str, str]) -> dict:
     return {
         "job_id": job.id,
         "task_id": job.task_id,
+        "task_name": task_name,
         "status": job.status,
         "file_name": job.file_name,
         "created_at": job.created_at,
@@ -369,6 +424,13 @@ def _list_item(job: db.Job) -> dict:
         "cost_usd": job.cost_usd,
         "error_code": job.error.get("code") if isinstance(job.error, dict) else None,
         "issue_count": len(job.issues),
+        "issues": [
+            {
+                "field": _issue_field(issue, labels),
+                "message": issue.get("message") if isinstance(issue, dict) else None,
+            }
+            for issue in job.issues
+        ],
     }
 
 

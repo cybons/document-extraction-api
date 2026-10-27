@@ -156,19 +156,16 @@ class JobStore:
         *,
         start: str | None = None,
         end: str | None = None,
-        status: str | None = None,
+        statuses: list[str] | None = None,
         task_id: str | None = None,
         before: str | None = None,
         limit: int = 50,
     ) -> list[Job]:
         """拠点のジョブを新しい順に返す。before はページ送りの手がかり（前のページの最後の id）。"""
-        where, params = _period(site, start, end)
-        if status is not None:
-            where.append("status=?")
-            params.append(status)
-        if task_id is not None:
-            where.append("task_id=?")
-            params.append(task_id)
+        where, params = _period(site, start, end, task_id)
+        if statuses:
+            where.append(f"status IN ({','.join('?' * len(statuses))})")
+            params.extend(statuses)
         if before is not None:
             where.append("id<?")
             params.append(before)
@@ -179,9 +176,20 @@ class JobStore:
             ).fetchall()
         return [_job(row) for row in rows]
 
-    def summary(self, site: str, *, start: str | None = None, end: str | None = None) -> dict:
-        """拠点のジョブの状態ごとの件数、トークンと費用の合計、タスクごとの内訳。"""
-        where, params = _period(site, start, end)
+    def summary(
+        self,
+        site: str,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        task_id: str | None = None,
+        utc_offset_minutes: int = 0,
+    ) -> dict:
+        """拠点のジョブの状態ごとの件数、トークンと費用の合計、タスクごとと日ごとの内訳。
+
+        日ごとの内訳は、受付時刻を utc_offset_minutes だけずらした日付で区切る。
+        """
+        where, params = _period(site, start, end, task_id)
         condition = " AND ".join(where)
         # トークンを使ったのに費用が出ていないジョブ（単価の設定がないモデル）も数える
         totals = (
@@ -200,13 +208,32 @@ class JobStore:
                 " GROUP BY task_id ORDER BY task_id",
                 params,
             ).fetchall()
+            task_statuses = conn.execute(
+                f"SELECT task_id, status, COUNT(*) AS n FROM jobs WHERE {condition}"
+                " GROUP BY task_id, status",
+                params,
+            ).fetchall()
+            shift = f"{utc_offset_minutes:+d} minutes"
+            day_statuses = conn.execute(
+                f"SELECT date(created_at, ?) AS day, status, COUNT(*) AS n,"
+                f" COALESCE(SUM(cost_usd), 0) AS cost_usd FROM jobs WHERE {condition}"
+                " GROUP BY day, status ORDER BY day",
+                (shift, *params),
+            ).fetchall()
         return {
-            "status_counts": {
-                name: 0 for name in (QUEUED, PROCESSING, SUCCEEDED, NEEDS_REVIEW, FAILED)
-            }
-            | {row["status"]: row["n"] for row in statuses},
+            "status_counts": _status_counts(statuses),
             **_totals(total),
-            "tasks": [{"task_id": row["task_id"], **_totals(row)} for row in tasks],
+            "tasks": [
+                {
+                    "task_id": row["task_id"],
+                    **_totals(row),
+                    "status_counts": _status_counts(
+                        r for r in task_statuses if r["task_id"] == row["task_id"]
+                    ),
+                }
+                for row in tasks
+            ],
+            "days": _days(day_statuses),
         }
 
     def claim_next(self) -> Job | None:
@@ -283,8 +310,13 @@ class JobStore:
             conn.execute(f"UPDATE jobs SET {columns} WHERE id=?", (*values.values(), job_id))
 
 
-def _period(site: str, start: str | None, end: str | None) -> tuple[list[str], list[Any]]:
+def _period(
+    site: str, start: str | None, end: str | None, task_id: str | None = None
+) -> tuple[list[str], list[Any]]:
     where, params = ["site=?"], [site]
+    if task_id is not None:
+        where.append("task_id=?")
+        params.append(task_id)
     if start is not None:
         where.append("created_at>=?")
         params.append(start)
@@ -292,6 +324,28 @@ def _period(site: str, start: str | None, end: str | None) -> tuple[list[str], l
         where.append("created_at<?")
         params.append(end)
     return where, params
+
+
+def _status_counts(rows) -> dict[str, int]:
+    counts = dict.fromkeys((QUEUED, PROCESSING, SUCCEEDED, NEEDS_REVIEW, FAILED), 0)
+    for row in rows:
+        counts[row["status"]] = row["n"]
+    return counts
+
+
+def _days(rows: list[sqlite3.Row]) -> list[dict]:
+    days: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        days.setdefault(row["day"], []).append(row)
+    return [
+        {
+            "date": day,
+            "jobs": sum(r["n"] for r in group),
+            "cost_usd": sum(r["cost_usd"] for r in group),
+            "status_counts": _status_counts(group),
+        }
+        for day, group in days.items()
+    ]
 
 
 def _totals(row: sqlite3.Row) -> dict:
