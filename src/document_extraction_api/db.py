@@ -129,13 +129,13 @@ class JobStore:
                         stamp,
                     ),
                 )
+                # 読み直しも COMMIT の前に行う。失敗したら登録ごと取り消すので、ファイルを消してよい
+                row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
-        job = self.get(job_id)
-        assert job is not None
-        return job, True
+        return _job(row), True
 
     def get(self, job_id: str) -> Job | None:
         with closing(self.connect()) as conn:

@@ -481,6 +481,18 @@ def test_08_transparent_image_is_composited_on_white(tmp_path, settings):
         assert page.getpixel((0, 0)) == (255, 255, 255)
 
 
+def test_08b_color_key_transparency_is_composited_on_white(tmp_path, settings):
+    import io
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 20), (0, 0, 0)).save(buffer, format="PNG", transparency=(0, 0, 0))
+    source = tmp_path / "input"
+    source.write_bytes(buffer.getvalue())
+    pages = render_pages(source, tmp_path / "pages", settings)
+    with Image.open(pages[0]) as page:
+        assert page.getpixel((0, 0)) == (255, 255, 255)
+
+
 # 9. 金額も明細も持たないテスト専用タスクが、基盤のコードを変えずにHTTP経由で受付から取得まで通る。
 async def test_09_task_without_amounts_runs_end_to_end(settings):
     extractor = FakeExtractor(claude_message({"title": "テスト文書"}))
@@ -507,6 +519,21 @@ def test_07d_missing_claude_key_stops_startup(tmp_path, processes_dir):
     finally:
         logging.getLogger().handlers.clear()
     assert "claude_api_key" in (tmp_path / "logs" / "service.log").read_text(encoding="utf-8")
+
+
+def test_07e_malformed_setting_value_is_logged(tmp_path, processes_dir):
+    path = _settings_file(tmp_path, 0)
+    path.write_text(
+        path.read_text(encoding="utf-8") + "[prices.claude-test]\ninput_per_mtok = 4\n",
+        encoding="utf-8",
+    )
+    try:
+        assert serve(path) == 1
+    finally:
+        logging.getLogger().handlers.clear()
+    log = (tmp_path / "logs" / "service.log").read_text(encoding="utf-8")
+    assert "起動に失敗" in log
+    assert "sk-test" not in log
 
 
 async def test_04b_slow_recording_after_response_is_not_cut_off(settings, monkeypatch):

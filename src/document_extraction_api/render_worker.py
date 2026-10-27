@@ -89,7 +89,7 @@ def _on_white(image):
     """透過を白い背景に合成して RGB にする。"""
     from PIL import Image
 
-    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+    if image.mode in ("RGBA", "LA", "PA") or "transparency" in image.info:
         rgba = image.convert("RGBA")
         background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
         return Image.alpha_composite(background, rgba).convert("RGB")

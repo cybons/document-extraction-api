@@ -146,7 +146,6 @@ async def test_unreadable_values_returned_as_null_are_kept_null(settings):
             "response_truncated",
         ),
         (claude_message(None, text="これはJSONではない"), "invalid_json"),
-        (claude_message({"unexpected": 1}), "invalid_json"),
     ],
 )
 async def test_unusable_responses_fail_and_keep_the_raw_response(settings, message, code):
@@ -155,6 +154,13 @@ async def test_unusable_responses_fail_and_keep_the_raw_response(settings, messa
     assert result["error"]["code"] == code
     assert result["data"] is None
     assert result["usage"]["input_tokens"] == 1000
+
+
+async def test_json_that_does_not_fit_the_definition_needs_review(settings):
+    result = await _run(settings, message=claude_message({"unexpected": 1}))
+    assert result["status"] == "needs_review"
+    assert result["data"] == {"unexpected": 1}
+    assert result["issues"] == [{"path": "", "raw": None, "message": "出力の形が定義と合わない"}]
 
 
 async def test_claude_unavailable_fails_the_job(settings):

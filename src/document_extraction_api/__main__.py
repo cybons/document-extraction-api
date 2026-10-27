@@ -126,9 +126,10 @@ def _log_file_hint(settings_path: Path) -> Path | None:
 def serve(settings_path: Path) -> int:
     try:
         settings = load_settings(settings_path)
-    except SettingsError as error:
+    except Exception as error:
         setup_logging(_log_file_hint(settings_path))
-        logger.error("起動に失敗: %s", error)
+        message = error if isinstance(error, SettingsError) else type(error).__name__
+        logger.error("起動に失敗: %s", message)
         return 1
     setup_logging(settings.log_file)
     try:

@@ -63,6 +63,16 @@ def load_settings(path: Path) -> Settings:
 
 
 def parse_settings(raw: dict, base_dir: Path) -> Settings:
+    try:
+        return _parse_settings(raw, base_dir)
+    except SettingsError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        # 値は書かない（キーが入っていることがある）
+        raise SettingsError(f"設定の項目が正しくない: {type(error).__name__}") from error
+
+
+def _parse_settings(raw: dict, base_dir: Path) -> Settings:
     raw = dict(raw)
     sites_raw = raw.pop("sites", None)
     if not sites_raw:

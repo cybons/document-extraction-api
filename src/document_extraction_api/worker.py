@@ -200,7 +200,9 @@ class Worker:
         try:
             validated = validate_output(process, output)
         except InvalidOutput:
-            self.store.finish(job.id, db.FAILED, error=_error("invalid_json"), **record)
+            # JSON としては読めたので失敗にしない。検証できなかった応答をそのまま返して要確認にする
+            issue = {"path": "", "raw": None, "message": "出力の形が定義と合わない"}
+            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=[issue], **record)
             return
         status = db.NEEDS_REVIEW if validated.issues else db.SUCCEEDED
         self.store.finish(job.id, status, data=validated.data, issues=validated.issues, **record)

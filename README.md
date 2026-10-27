@@ -91,9 +91,9 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 | Claude が応答しない | `claude_timeout`、`claude_connection_error`、`claude_http_<状態>`、`claude_error`（そのほかの呼び出しの誤り）、`claude_refused`、`claude_no_response`（送った後の中断が `max_attempts` 回続いた）、`job_timeout` |
 | 応答が JSON にならない | `invalid_json`、`response_truncated`（`max_tokens` で途切れた） |
 
-想定外の誤りも、起きた段階で上のどれかになる。Claude の応答を保存した後は失敗にしない。
+想定外の誤りも、起きた段階で上のどれかになる。Claude の応答を保存した後の想定外の誤りは失敗にせず、要確認にする。
 - 処理の `check` が例外で止まったときは、その旨を `issues` に入れて要確認にする。
-- 処理の定義を読み込めないときは、検証していない応答を `data` に入れて要確認にする。
+- 処理の定義を読み込めないとき、JSON は読めたが形が定義と合わないときは、検証していない応答を `data` に入れて要確認にする。
 
 ## 処理を足す・直す
 
