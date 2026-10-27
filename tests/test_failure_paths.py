@@ -573,3 +573,26 @@ async def test_04b_slow_recording_after_response_is_not_cut_off(settings, monkey
     assert job.status == db.SUCCEEDED
     assert job.data["total"] == "100"
     assert len(extractor.calls) == 1
+
+
+def test_07f_ctrl_c_stops_quietly(tmp_path, processes_dir, monkeypatch, capsys):
+    import uvicorn
+
+    def interrupted(self, sockets=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(uvicorn.Server, "run", interrupted)
+    path = _settings_file(tmp_path, 0)
+    try:
+        assert serve(path) == 0
+    finally:
+        logging.getLogger().handlers.clear()
+    log = (tmp_path / "logs" / "service.log").read_text(encoding="utf-8")
+    assert "停止" in log
+    assert "Traceback" not in capsys.readouterr().err
+    # ロックを外しているので、もう一度起動できる
+    monkeypatch.setattr(uvicorn.Server, "run", lambda self, sockets=None: None)
+    try:
+        assert serve(path) == 0
+    finally:
+        logging.getLogger().handlers.clear()
