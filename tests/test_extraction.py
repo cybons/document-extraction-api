@@ -498,3 +498,44 @@ def test_date_is_sent_to_claude_as_text(processes_dir):
     assert process.schema["properties"]["issued"] == {
         "anyOf": [{"type": "string"}, {"type": "null"}]
     }
+
+
+def _with_metadata(model="claude-test", **usage):
+    message = claude_message({"issued": None, "total": "1", "lines": []}, model=model)
+    message["usage"] = {"input_tokens": 1000, "output_tokens": 200, **usage}
+    return message
+
+
+BROKEN_METADATA = [
+    (_with_metadata(input_tokens="unknown"), "usage.input_tokens"),
+    (_with_metadata(model={"name": "claude-test"}), "model"),
+    (_with_metadata(model="unpriced", input_tokens=[]), "usage.input_tokens"),
+    (_with_metadata(output_tokens=True), "usage.output_tokens"),
+    (_with_metadata(output_tokens=2**70), "usage.output_tokens"),
+    (_with_metadata(input_tokens=-1), "usage.input_tokens"),
+]
+
+
+@pytest.mark.parametrize(("message", "name"), BROKEN_METADATA)
+async def test_unreadable_model_or_usage_finishes_the_job_as_review(settings, message, name):
+    result = await _run(settings, message=message)
+    assert result["status"] == "needs_review"
+    assert result["data"]["total"] == "1"
+    assert result["issues"] == [{"path": "", "raw": None, "message": f"応答の {name} を読めない"}]
+
+
+@pytest.mark.parametrize(("message", "name"), BROKEN_METADATA)
+async def test_unreadable_model_or_usage_in_a_saved_response_finishes_on_recovery(
+    settings, message, name
+):
+    app = make_app(settings, FakeExtractor())
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+    store.claim_next()
+    store.mark_sent(job_id)
+    worker_module._write_atomic(job_dir(settings, job_id) / RESPONSE_FILE, message)
+    fastapi_app(app).state.worker.recover()
+    job = store.get(job_id)
+    assert job.status == db.NEEDS_REVIEW
+    assert job.issues == [{"path": "", "raw": None, "message": f"応答の {name} を読めない"}]

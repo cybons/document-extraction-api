@@ -184,11 +184,9 @@ class Worker:
                 process = load_snapshot(job.site, job_dir(self.settings, job.id) / PROCESS_DIR)
             except Exception as error:
                 logger.error("処理の写しを読み込めない: %s %s", job.id, type(error).__name__)
-        usage = raw.get("usage")
-        usage = usage if isinstance(usage, dict) else {}
-        model = raw.get("model")
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
+        # 応答に付いてくるモデル名と使用量は、型を確かめてから記録する（記録で止まると処理中のまま
+        # 残る）。合わない値は空として記録し、元の値は raw_response に残る
+        model, input_tokens, output_tokens, unreadable = _metadata(raw)
         record = {
             "model": model,
             "input_tokens": input_tokens,
@@ -196,6 +194,9 @@ class Worker:
             "cost_usd": self._cost(model, input_tokens, output_tokens),
             "raw_response": raw,
         }
+        metadata_issues = [
+            {"path": "", "raw": None, "message": f"応答の {name} を読めない"} for name in unreadable
+        ]
 
         stop_reason = raw.get("stop_reason")
         if stop_reason == "refusal":
@@ -220,7 +221,8 @@ class Worker:
         if process is None:
             # 課金済みの結果は捨てない。検証できなかったことを示して要確認にする
             issue = {"path": "", "raw": None, "message": "処理の定義を読み込めず、検証していない"}
-            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=[issue], **record)
+            issues = [issue, *metadata_issues]
+            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=issues, **record)
             return
         try:
             validated = validate_output(process, output)
@@ -234,11 +236,12 @@ class Worker:
             else:
                 logger.error("検証で例外: %s %s", job.id, type(error).__name__)
                 message = f"検証が例外で止まった: {type(error).__name__}"
-            issue = {"path": "", "raw": None, "message": message}
-            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=[issue], **record)
+            issues = [{"path": "", "raw": None, "message": message}, *metadata_issues]
+            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=issues, **record)
             return
-        status = db.NEEDS_REVIEW if validated.issues else db.SUCCEEDED
-        self.store.finish(job.id, status, data=validated.data, issues=validated.issues, **record)
+        issues = [*validated.issues, *metadata_issues]
+        status = db.NEEDS_REVIEW if issues else db.SUCCEEDED
+        self.store.finish(job.id, status, data=validated.data, issues=issues, **record)
         logger.info("ジョブ完了: %s %s", job.id, status)
 
     def _cost(self, model: str | None, input_tokens: int | None, output_tokens: int | None):
@@ -267,6 +270,35 @@ def _error(code: str, attempts: int | None = None) -> dict:
     if attempts is not None:
         error["attempts"] = attempts
     return error
+
+
+_MAX_TOKENS_RECORDED = 2**63 - 1
+"""SQLite の整数に入る上限。"""
+
+
+def _metadata(raw: dict) -> tuple[str | None, int | None, int | None, list[str]]:
+    """応答からモデル名と入出力のトークン数を取り出す。型が合わない値は None にし、名前を返す。"""
+    unreadable = []
+    model = raw.get("model")
+    if model is not None and not isinstance(model, str):
+        model = None
+        unreadable.append("model")
+    usage = raw.get("usage")
+    if usage is not None and not isinstance(usage, dict):
+        unreadable.append("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    tokens = []
+    for name in ("input_tokens", "output_tokens"):
+        value = usage.get(name)
+        if value is not None and not (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 <= value <= _MAX_TOKENS_RECORDED
+        ):
+            value = None
+            unreadable.append(f"usage.{name}")
+        tokens.append(value)
+    return model, tokens[0], tokens[1], unreadable
 
 
 def _base64_length(data: bytes) -> int:
