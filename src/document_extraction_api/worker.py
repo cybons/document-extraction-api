@@ -13,15 +13,18 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 from . import db
 from .claude import ClaudeUnavailable, Extractor
 from .processes import InvalidOutput, Process, load_snapshot, validate_output
 from .render import RenderError, render_pages
 from .settings import Settings
+from .storable import replaced_issue, storable
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +93,8 @@ class Worker:
         if response_path.exists():
             try:
                 raw = json.loads(response_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                # 壊れた JSON、UTF-8 でない中身、桁数や入れ子の上限を超えた中身
                 self.store.finish(job.id, db.FAILED, error=_error("invalid_json"))
                 return
             self._finalize(job, raw)
@@ -174,18 +178,31 @@ class Worker:
         await asyncio.to_thread(_write_atomic, directory / RESPONSE_FILE, response.raw)
         await asyncio.to_thread(self._finalize, job, response.raw, process)
 
-    def _finalize(self, job: db.Job, raw: dict, process: Process | None = None) -> None:
-        """保存済みの Claude の応答から結果を確定する。"""
+    def _finalize(self, job: db.Job, raw: Any, process: Process | None = None) -> None:
+        """保存済みの Claude の応答から結果を確定する。
+
+        結果は、記録して返せる値にそろえてから記録する。そろえる途中で何が起きても、決まった中身
+        だけで要確認にして終える。ここから外へ出る例外は、記録（DB）の誤りだけにする。
+        """
+        try:
+            status, values = self._result(job, raw, process)
+            status, values = _storable_result(status, values)
+        except Exception as error:
+            logger.error("結果を確定できない: %s %s", job.id, type(error).__name__)
+            status, values = db.NEEDS_REVIEW, {"issues": [_UNRECORDABLE_ISSUE]}
+        self.store.finish(job.id, status, **values)
+        logger.info("ジョブ完了: %s %s %s", job.id, status, (values.get("error") or {}).get("code"))
+
+    def _result(self, job: db.Job, raw: Any, process: Process | None) -> tuple[str, dict]:
         if not isinstance(raw, dict):
-            self.store.finish(job.id, db.FAILED, error=_error("invalid_json"))
-            return
+            return db.FAILED, {"error": _error("invalid_json")}
         if process is None:
             try:
                 process = load_snapshot(job.site, job_dir(self.settings, job.id) / PROCESS_DIR)
             except Exception as error:
                 logger.error("処理の写しを読み込めない: %s %s", job.id, type(error).__name__)
-        # 応答に付いてくるモデル名と使用量は、型を確かめてから記録する（記録で止まると処理中のまま
-        # 残る）。合わない値は空として記録し、元の値は raw_response に残る
+        # 応答に付いてくるモデル名と使用量は、型を確かめてから記録する。合わない値は空として
+        # 記録し、元の値は raw_response に残る
         model, input_tokens, output_tokens, unreadable = _metadata(raw)
         record = {
             "model": model,
@@ -200,11 +217,9 @@ class Worker:
 
         stop_reason = raw.get("stop_reason")
         if stop_reason == "refusal":
-            self.store.finish(job.id, db.FAILED, error=_error("claude_refused"), **record)
-            return
+            return db.FAILED, {"error": _error("claude_refused"), **record}
         if stop_reason == "max_tokens":
-            self.store.finish(job.id, db.FAILED, error=_error("response_truncated"), **record)
-            return
+            return db.FAILED, {"error": _error("response_truncated"), **record}
         content = raw.get("content")
         text = "".join(
             block["text"]
@@ -215,20 +230,15 @@ class Worker:
         )
         try:
             output = json.loads(text)
-        except json.JSONDecodeError:
-            self.store.finish(job.id, db.FAILED, error=_error("invalid_json"), **record)
-            return
+        except (ValueError, RecursionError):
+            # JSON の誤りのほか、桁数や入れ子の上限を超えたときも、応答が JSON にならないとする
+            return db.FAILED, {"error": _error("invalid_json"), **record}
         if process is None:
             # 課金済みの結果は捨てない。検証できなかったことを示して要確認にする
             issue = {"path": "", "raw": None, "message": "処理の定義を読み込めず、検証していない"}
-            issues = [issue, *metadata_issues]
-            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=issues, **record)
-            return
+            return db.NEEDS_REVIEW, {"data": output, "issues": [issue, *metadata_issues], **record}
         try:
             validated = validate_output(process, output)
-            # 記録できない値が混じっていないことを、ここで確かめる（記録で止まると処理中のまま残る）
-            json.dumps(validated.data)
-            json.dumps(validated.issues)
         except Exception as error:
             # JSON としては読めたので失敗にしない。検証できなかった応答をそのまま返して要確認にする
             if isinstance(error, InvalidOutput):
@@ -237,22 +247,19 @@ class Worker:
                 logger.error("検証で例外: %s %s", job.id, type(error).__name__)
                 message = f"検証が例外で止まった: {type(error).__name__}"
             issues = [{"path": "", "raw": None, "message": message}, *metadata_issues]
-            self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=issues, **record)
-            return
+            return db.NEEDS_REVIEW, {"data": output, "issues": issues, **record}
         issues = [*validated.issues, *metadata_issues]
         status = db.NEEDS_REVIEW if issues else db.SUCCEEDED
-        self.store.finish(job.id, status, data=validated.data, issues=issues, **record)
-        logger.info("ジョブ完了: %s %s", job.id, status)
+        return status, {"data": validated.data, "issues": issues, **record}
 
     def _cost(self, model: str | None, input_tokens: int | None, output_tokens: int | None):
         price = self.settings.prices.get(model or "")
         if price is None or input_tokens is None or output_tokens is None:
             return None
-        return round(
-            (input_tokens * price.input_per_mtok + output_tokens * price.output_per_mtok)
-            / 1_000_000,
-            6,
-        )
+        cost = (
+            input_tokens * price.input_per_mtok + output_tokens * price.output_per_mtok
+        ) / 1_000_000
+        return round(cost, 6) if math.isfinite(cost) else None
 
     async def _finish_safely(self, job: db.Job, status: str, **values) -> None:
         """結果の記録に失敗しても止まらない。残ったジョブは recover が立て直す。"""
@@ -263,6 +270,45 @@ class Worker:
             )
         except Exception as error:
             logger.error("ジョブの記録に失敗: %s %s", job.id, type(error).__name__)
+
+
+_UNRECORDABLE_ISSUE = {
+    "path": "",
+    "raw": None,
+    "message": "結果を記録できる形にできず、検証の結果を残していない",
+}
+
+
+def _storable_result(status: str, values: dict) -> tuple[str, dict]:
+    """記録する値をそろえる。置き換えた箇所があれば指摘を足し、成功を要確認にする。
+
+    raw_response は返さない列なので、そろえずに ASCII の JSON で記録する（db.finish）。
+    """
+    result = dict(values)
+    replaced: list[str] = []
+    for name in ("data", "issues", "error", "model"):
+        if name in result:
+            result[name], found = storable(result[name])
+            replaced += [_join(name, path) for path in found]
+    if replaced:
+        result["issues"] = [*(result.get("issues") or []), replaced_issue(replaced)]
+        if status == db.SUCCEEDED:
+            status = db.NEEDS_REVIEW
+    if result.get("raw_response") is not None:
+        try:
+            json.dumps(result["raw_response"])
+        except (ValueError, RecursionError):
+            result["raw_response"] = None  # 元の応答はディスクに残っている
+    # 記録する前に、返すときと同じ厳しさで JSON にできることを確かめる（通らなければ受け皿へ）
+    returned = {name: value for name, value in result.items() if name != "raw_response"}
+    json.dumps(returned, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return status, result
+
+
+def _join(name: str, path: str) -> str:
+    if not path:
+        return name
+    return f"{name}{path}" if path.startswith("[") else f"{name}.{path}"
 
 
 def _error(code: str, attempts: int | None = None) -> dict:
@@ -319,7 +365,9 @@ def _request_bytes(process: Process, sizes: list[int]) -> int:
 def _write_atomic(path: Path, value: dict) -> None:
     temp = path.with_suffix(".tmp")
     with temp.open("w", encoding="utf-8") as f:
-        json.dump(value, f, ensure_ascii=False)
+        # ASCII で書く。UTF-8 にできない文字があっても保存で止まらない
+        # （保存の前に止まると、送り直して二重に課金する）
+        json.dump(value, f)
         f.flush()
         os.fsync(f.fileno())
     os.replace(temp, path)

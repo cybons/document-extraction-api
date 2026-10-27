@@ -1,6 +1,7 @@
 """サーバー上の設定ファイル（TOML）を読む。設定ファイルはGitに入れない。"""
 
 import hashlib
+import math
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +96,10 @@ def _parse_settings(raw: dict, base_dir: Path) -> Settings:
         model: Price(float(p["input_per_mtok"]), float(p["output_per_mtok"]))
         for model, p in raw.pop("prices", {}).items()
     }
+    for model, price in prices.items():
+        values = (price.input_per_mtok, price.output_per_mtok)
+        if not all(math.isfinite(v) and v >= 0 for v in values):
+            raise SettingsError(f"[prices.{model}] の単価は0以上の有限の数にする")
 
     def resolve(value: str) -> Path:
         p = Path(value)

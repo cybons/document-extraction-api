@@ -204,7 +204,8 @@ class JobStore:
             cost_usd=cost_usd,
             raw_response=None
             if raw_response is None
-            else json.dumps(raw_response, ensure_ascii=False),
+            # 返さない列。UTF-8 にできない文字があっても記録で止まらないように ASCII で書く
+            else json.dumps(raw_response),
             finished_at=now(),
         )
 
