@@ -161,7 +161,8 @@ def claude_schema(output: type[BaseModel]) -> dict:
 def validate_output(process: Process, raw: Any) -> Validated:
     """Claude の出力を定義で検証する。
 
-    値が形に合わない項目は null にし、元の値を issues に残す。そのうえで check の指摘を足す。
+    値が形に合わない項目は null にし、元の値を issues に残す。日付は変換できなくても元の文字を
+    data に残し、issues にも入れる。そのうえで check の指摘を足す。
     構造が合わないときは InvalidOutput を投げる。
     """
     data = copy.deepcopy(raw)
@@ -181,18 +182,42 @@ def validate_output(process: Process, raw: Any) -> Validated:
             model = process.output.model_validate(data)
         except ValidationError as again:
             raise InvalidOutput() from again
+    for loc, value in _unreadable_dates(model, ()):
+        issues.append({"path": _format_path(loc), "raw": value.raw, "message": value.problem})
     if process.check is not None:
-        try:
-            found = [
-                {"path": issue.path, "raw": None, "message": issue.message}
-                for issue in process.check(model)
-            ]
-        except Exception as error:
-            # check は処理ごとに書くコード。止まっても課金済みの結果は捨てず、要確認にする
-            message = f"check が例外で止まった: {type(error).__name__}"
-            found = [{"path": "", "raw": None, "message": message}]
-        issues.extend(found)
+        issues.extend(_check(process, model))
     return Validated(model.model_dump(mode="json"), issues)
+
+
+def _check(process: Process, model: BaseModel) -> list[dict]:
+    """処理の check を呼ぶ。check は処理ごとに書くコードなので、止まっても戻り値が正しくなくても
+    課金済みの結果は捨てず、その旨を指摘にして要確認にする。"""
+    try:
+        returned = list(process.check(model))
+    except Exception as error:
+        message = f"check が例外で止まった: {type(error).__name__}"
+        return [{"path": "", "raw": None, "message": message}]
+    if not all(
+        isinstance(issue, fields.Issue)
+        and isinstance(issue.path, str)
+        and isinstance(issue.message, str)
+        for issue in returned
+    ):
+        message = "check の戻り値が Issue（path と message が文字）でない"
+        return [{"path": "", "raw": None, "message": message}]
+    return [{"path": issue.path, "raw": None, "message": issue.message} for issue in returned]
+
+
+def _unreadable_dates(node: Any, loc: tuple):
+    if isinstance(node, fields.DateValue):
+        if node.problem is not None:
+            yield loc, node
+    elif isinstance(node, BaseModel):
+        for name in type(node).model_fields:
+            yield from _unreadable_dates(getattr(node, name), (*loc, name))
+    elif isinstance(node, list | tuple):
+        for index, item in enumerate(node):
+            yield from _unreadable_dates(item, (*loc, index))
 
 
 def _get(node: Any, loc: tuple) -> Any:

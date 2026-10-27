@@ -30,6 +30,13 @@ INPUT_FILE = "input"
 PROCESS_DIR = "process"
 MAX_IMAGE_BASE64_BYTES = 10_000_000
 """Claude API の画像1枚の上限（base64 で 10MB）。設定では緩められない。"""
+MAX_REQUEST_BYTES = 32_000_000
+"""Claude API の要求全体の上限（32MB）。画像・プロンプト・出力の形を合わせて測る。
+設定では緩められない。"""
+REQUEST_OVERHEAD_BYTES = 4096
+"""要求のうち、画像・プロンプト・出力の形以外（モデル名や JSON の括弧など）に見込む大きさ。"""
+IMAGE_OVERHEAD_BYTES = 256
+"""画像1枚ごとに、base64 の本体以外に見込む大きさ。"""
 
 
 def job_dir(settings: Settings, job_id: str) -> Path:
@@ -137,6 +144,7 @@ class Worker:
         if (
             max(sizes) > MAX_IMAGE_BASE64_BYTES
             or sum(sizes) > self.settings.max_request_image_bytes
+            or _request_bytes(process, sizes) > MAX_REQUEST_BYTES
         ):
             # Claude API の画像1枚（10MB）か要求全体（32MB）の上限を超えるので送らない
             await self._finish_safely(job, db.FAILED, error=_error("too_large"))
@@ -168,12 +176,16 @@ class Worker:
 
     def _finalize(self, job: db.Job, raw: dict, process: Process | None = None) -> None:
         """保存済みの Claude の応答から結果を確定する。"""
+        if not isinstance(raw, dict):
+            self.store.finish(job.id, db.FAILED, error=_error("invalid_json"))
+            return
         if process is None:
             try:
                 process = load_snapshot(job.site, job_dir(self.settings, job.id) / PROCESS_DIR)
             except Exception as error:
                 logger.error("処理の写しを読み込めない: %s %s", job.id, type(error).__name__)
-        usage = raw.get("usage") or {}
+        usage = raw.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
         model = raw.get("model")
         input_tokens = usage.get("input_tokens")
         output_tokens = usage.get("output_tokens")
@@ -192,8 +204,13 @@ class Worker:
         if stop_reason == "max_tokens":
             self.store.finish(job.id, db.FAILED, error=_error("response_truncated"), **record)
             return
+        content = raw.get("content")
         text = "".join(
-            block.get("text", "") for block in raw.get("content", []) if block.get("type") == "text"
+            block["text"]
+            for block in (content if isinstance(content, list) else [])
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
         )
         try:
             output = json.loads(text)
@@ -207,6 +224,9 @@ class Worker:
             return
         try:
             validated = validate_output(process, output)
+            # 記録できない値が混じっていないことを、ここで確かめる（記録で止まると処理中のまま残る）
+            json.dumps(validated.data)
+            json.dumps(validated.issues)
         except Exception as error:
             # JSON としては読めたので失敗にしない。検証できなかった応答をそのまま返して要確認にする
             if isinstance(error, InvalidOutput):
@@ -251,6 +271,17 @@ def _error(code: str, attempts: int | None = None) -> dict:
 
 def _base64_length(data: bytes) -> int:
     return 4 * ((len(data) + 2) // 3)
+
+
+def _request_bytes(process: Process, sizes: list[int]) -> int:
+    """Claude へ送る要求の大きさを、多めに見積もる（日本語は \\uXXXX で数える）。"""
+    return (
+        sum(sizes)
+        + IMAGE_OVERHEAD_BYTES * len(sizes)
+        + len(json.dumps(process.prompt))
+        + len(json.dumps(process.schema))
+        + REQUEST_OVERHEAD_BYTES
+    )
 
 
 def _write_atomic(path: Path, value: dict) -> None:

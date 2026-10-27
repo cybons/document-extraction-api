@@ -46,7 +46,7 @@ async def test_values_are_parsed(settings):
     )
     assert result["status"] == "succeeded"
     assert result["data"] == {
-        "issued": "2026-10-27",
+        "issued": {"value": "2026-10-27", "raw": "令和8年10月27日"},
         "total": "1200",
         "lines": [{"name": "部品", "quantity": "10"}],
     }
@@ -68,12 +68,43 @@ async def test_invalid_values_become_null_and_need_review(settings):
         },
     )
     assert result["status"] == "needs_review"
-    assert result["data"]["issued"] is None
+    assert result["data"]["issued"] == {"value": None, "raw": "2026/13/40"}
     assert result["data"]["lines"][1] == {"name": "B", "quantity": None}
     assert result["data"]["lines"][0]["quantity"] == "5"
     assert result["issues"] == [
-        {"path": "issued", "raw": "2026/13/40", "message": "日付として読めない"},
         {"path": "lines[1].quantity", "raw": "1O", "message": "数値として読めない"},
+        {"path": "issued", "raw": "2026/13/40", "message": "日付として読めない"},
+    ]
+
+
+async def test_unreadable_date_in_nested_record_keeps_raw(settings, processes_dir):
+    write_process(
+        processes_dir,
+        "site_a",
+        "dates",
+        """
+        from document_extraction_api.fields import Date, Record
+
+        TASK_ID = "dates.extract"
+
+
+        class Line(Record):
+            shipped: Date
+
+
+        class Output(Record):
+            lines: list[Line]
+        """,
+    )
+    output = {"lines": [{"shipped": "2026-10-27"}, {"shipped": "来週"}]}
+    result = await _run(settings, output, task_id="dates.extract")
+    assert result["status"] == "needs_review"
+    assert result["data"]["lines"] == [
+        {"shipped": {"value": "2026-10-27", "raw": "2026-10-27"}},
+        {"shipped": {"value": None, "raw": "来週"}},
+    ]
+    assert result["issues"] == [
+        {"path": "lines[1].shipped", "raw": "来週", "message": "日付として読めない"}
     ]
 
 
@@ -116,6 +147,8 @@ async def test_check_that_raises_marks_review_instead_of_failing(settings, proce
         "def check(data):\n    return None\n",
         "def check(data):\n    yield Issue('title', 'x')\n    raise RuntimeError('bug')\n",
         "def check(data):\n    return [object()]\n",
+        "def check(data):\n    return [Issue('title', ValueError('x'))]\n",
+        "def check(data):\n    return [Issue(1, 'x')]\n",
     ],
 )
 async def test_any_error_in_check_marks_review_and_finishes_the_job(settings, processes_dir, check):
@@ -136,7 +169,7 @@ async def test_any_error_in_check_marks_review_and_finishes_the_job(settings, pr
     job = store.get(job_id)
     assert job.status == db.NEEDS_REVIEW
     assert job.data == {"title": "A"}
-    assert job.issues[-1]["message"].startswith("check が例外で止まった")
+    assert job.issues[-1]["message"].startswith("check ")
     assert len(extractor.calls) == 1
     assert store.processing() == []
 
@@ -180,7 +213,7 @@ async def test_saved_response_is_kept_when_the_process_cannot_be_loaded(settings
 async def test_unreadable_values_returned_as_null_are_kept_null(settings):
     result = await _run(settings, {"issued": None, "total": "1", "lines": []})
     assert result["status"] == "succeeded"
-    assert result["data"]["issued"] is None
+    assert result["data"]["issued"] == {"value": None, "raw": None}
 
 
 @pytest.mark.parametrize(
@@ -396,6 +429,43 @@ async def test_pages_over_the_request_limit_are_not_sent(settings):
     assert extractor.calls == []
 
 
+async def test_request_over_the_fixed_limit_is_not_sent_even_if_the_setting_allows(
+    settings, monkeypatch
+):
+    monkeypatch.setattr(worker_module, "MAX_REQUEST_BYTES", 100)
+    extractor = FakeExtractor()
+    app = make_app(settings, extractor, max_request_image_bytes=10**12)
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+        await run_one(app)
+        result = (await http.get(f"/api/v1/jobs/{job_id}", headers={"X-API-Key": KEY_A})).json()
+    assert result["error"] == {"code": "too_large"}
+    assert extractor.calls == []
+
+
+async def test_prompt_counts_toward_the_request_limit(settings, processes_dir, monkeypatch):
+    monkeypatch.setattr(worker_module, "MAX_REQUEST_BYTES", 100_000)
+    definition = "from document_extraction_api.fields import Record, Text\n" \
+        "TASK_ID = 'long.extract'\n" \
+        "class Output(Record):\n" \
+        "    title: Text\n"
+    write_process(processes_dir, "site_a", "long", definition, prompt="帳票" * 10_000)
+    write_process(processes_dir, "site_a", "short", definition.replace("long", "short"))
+    extractor = FakeExtractor(claude_message({"title": "A"}))
+    app = make_app(settings, extractor)
+    async with client(app) as http:
+        long_id = (await submit(http, task_id="long.extract")).json()["job_id"]
+        await run_one(app)
+        short_id = (await submit(http, task_id="short.extract")).json()["job_id"]
+        await run_one(app)
+        headers = {"X-API-Key": KEY_A}
+        long_job = (await http.get(f"/api/v1/jobs/{long_id}", headers=headers)).json()
+        short_job = (await http.get(f"/api/v1/jobs/{short_id}", headers=headers)).json()
+    assert long_job["error"] == {"code": "too_large"}
+    assert short_job["status"] == "succeeded"
+    assert len(extractor.calls) == 1
+
+
 async def test_page_over_the_single_image_limit_is_not_sent(settings, monkeypatch):
     monkeypatch.setattr(worker_module, "MAX_IMAGE_BASE64_BYTES", 100)
     extractor = FakeExtractor()
@@ -406,3 +476,25 @@ async def test_page_over_the_single_image_limit_is_not_sent(settings, monkeypatc
         result = (await http.get(f"/api/v1/jobs/{job_id}", headers={"X-API-Key": KEY_A})).json()
     assert result["error"] == {"code": "too_large"}
     assert extractor.calls == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        ["応答が", "オブジェクトでない"],
+        {"content": "文字", "stop_reason": "end_turn", "usage": "x"},
+        {"content": [None, {"type": "text", "text": 1}], "stop_reason": "end_turn"},
+    ],
+)
+async def test_response_of_unexpected_shape_fails_as_invalid_json(settings, message):
+    result = await _run(settings, message=message)
+    assert result["status"] == "failed"
+    assert result["error"] == {"code": "invalid_json"}
+
+
+def test_date_is_sent_to_claude_as_text(processes_dir):
+    registry = load_processes(processes_dir, ["site_a"])
+    process = registry.get("site_a", "typed.extract")
+    assert process.schema["properties"]["issued"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}]
+    }

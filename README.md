@@ -63,7 +63,11 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
   "task_id": "delivery.extract",
   "site": "parent",
   "status": "needs_review",
-  "data": {"document_number": "D-1", "items": [{"product_name": "部品A", "quantity": null}]},
+  "data": {
+    "document_number": "D-1",
+    "issue_date": {"value": "2026-10-27", "raw": "令和8年10月27日"},
+    "items": [{"product_name": "部品A", "quantity": null}]
+  },
   "issues": [{"path": "items[0].quantity", "raw": "1O", "message": "数値として読めない"}],
   "error": null,
   "versions": {"process": "parent/delivery@de711f25ba68", "model": "claude-opus-5-5"},
@@ -79,7 +83,8 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 | `failed` | 失敗。`error.code` を見る |
 
 - `data` の形は、選ばれた処理の定義が決める。
-- 定義の形に合わない値（日付・金額・数量など、どの項目も）は `null` にし、元の文字を `issues` の `raw` に残して要確認にする。
+- 定義の形に合わない値（金額・数量など、どの項目も）は `null` にし、元の文字を `issues` の `raw` に残して要確認にする。
+- 日付の項目は `{"value": 変換した日付, "raw": 帳票に書かれていた文字}` の組で返す。日付に変換できないときは `value` を `null` にし、`raw` は残したうえで `issues` にも入れて要確認にする。書かれていない日付は両方 `null`。
 - Claude が読めずに `null` で返した項目は、`null` のまま。要確認にするかは、各処理の `check` が決める。
 - `versions.process` は処理のファイルの内容から作る版。`versions.model` は実際に読んだモデル。
 - 待ちのジョブは、受け付けたときの処理とモデルで読む。設定のモデルを変えても、変える前に受け付けたジョブには効かない。
@@ -88,12 +93,12 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 
 | 場合 | `error.code` |
 |---|---|
-| ファイルが読めない | `unreadable_file`（Claude へ送る前の誤りや中断が `max_attempts` 回続いたときも）、`too_many_pages`（`max_pages` を超える）、`too_large`（画像にすると Claude API の画像1枚か要求全体の上限を超える）、`render_timeout` |
+| ファイルが読めない | `unreadable_file`（Claude へ送る前の誤りや中断が `max_attempts` 回続いたときも）、`too_many_pages`（`max_pages` を超える）、`too_large`（画像にすると Claude API の画像1枚（10MB）か要求全体（32MB、プロンプトと出力の形を含む）の上限を超える。`max_request_image_bytes` は上限を厳しくすることにしか使えない）、`render_timeout` |
 | Claude が応答しない | `claude_timeout`、`claude_connection_error`、`claude_http_<状態>`、`claude_error`（そのほかの呼び出しの誤り）、`claude_refused`、`claude_no_response`（送った後の中断が `max_attempts` 回続いた）、`job_timeout` |
 | 応答が JSON にならない | `invalid_json`、`response_truncated`（`max_tokens` で途切れた） |
 
 想定外の誤りも、起きた段階で上のどれかになる。Claude の応答を保存した後の想定外の誤りは失敗にせず、要確認にする。
-- 処理の `check` が例外で止まったときは、その旨を `issues` に入れて要確認にする。
+- 処理の `check` が例外で止まったとき、または `Issue`（`path` と `message` が文字）以外を返したときは、その旨を `issues` に入れて要確認にする。
 - 処理の定義を読み込めないとき、JSON は読めたが形が定義と合わないとき、検証が想定外の例外で止まったときは、検証していない応答を `data` に入れて要確認にする。
 
 ## 処理を足す・直す
@@ -126,7 +131,7 @@ def check(data: Output) -> list[Issue]:   # 任意。指摘があれば要確認
 
 - 項目の型は `Text`・`Number`・`Date` を使う。Claude には、どの項目も「書かれている文字」か `null` で書かせ、数値・日付への変換は基盤が行う（[fields.py](src/document_extraction_api/fields.py)）。
   - `Number` は桁区切りのカンマと全角数字を受け付ける。
-  - `Date` は西暦（`2026-10-27`、`2026/10/27`、`2026年10月27日`）と令和・平成を受け付ける。
+  - `Date` は西暦（`2026-10-27`、`2026/10/27`、`2026年10月27日`）と令和・平成を受け付ける。`check` には `value`（`datetime.date` か `None`）と `raw` を持つ値で渡る。
 - 受け付けたジョブは、受け付けたときの処理で読む。処理を直したり消したりしても、待ちのジョブには効かない。
 - 拠点に処理のないタスクは、その拠点では使えない。共通の処理への切り替えはしない。
 - `processes/` にある請求書・納品書の処理は仮の中身。項目とプロンプトは運用前に調整する。
@@ -135,7 +140,7 @@ def check(data: Output) -> list[Issue]:   # 任意。指摘があれば要確認
 
 - ジョブは SQLite（`data_dir/jobs.sqlite3`）に記録する。ファイル、受け付けたときの処理の写し、Claude の生の応答は `data_dir/jobs/<job_id>/` に置く。
 - 同時に処理するのは1件。前処理（PDF の画像化、ページの回転、写真の向き、透過の白背景合成）は子プロセスで行い、時間を超えたらプロセスツリーごと終了する。子プロセス自身も制限時間を持つ。
-- ページは長辺 2576px までの PNG にする。スキャンなどで 1.5MB を超えるページは JPEG（品質90）にする。Claude API の上限は、画像1枚 10MB・要求全体 32MB。
+- ページは長辺 2576px までの PNG にする。スキャンなどで 1.5MB を超えるページは JPEG（品質90）にする。Claude API の上限は、画像1枚 10MB・要求全体 32MB。要求全体は、画像・プロンプト・出力の形を合わせて多めに見積もって確かめる。
 - Claude へ送る前に送信時刻を記録し、受け取った応答は DB より先にディスクへ保存する。処理中のまま止まったジョブは、起動時と手が空いたときに立て直す。
   - 応答が保存済みなら、Claude を呼ばずに結果を確定する。
   - まだ送っていなければ、待ちに戻す。

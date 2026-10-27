@@ -45,7 +45,8 @@ class Settings:
     render_dpi: int = 200
     image_long_edge: int = 2576
     max_request_image_bytes: int = 28 * 1024 * 1024
-    """Claude へ送る画像の合計（base64）の上限。API の要求の上限は 32MB。"""
+    """Claude へ送る画像の合計（base64）の上限。要求全体の 32MB の上限は別に必ず確かめるので、
+    この設定は上限を厳しくすることにしか使えない。"""
     render_timeout_seconds: float = 120
     prices: dict[str, Price] = field(default_factory=dict)
 

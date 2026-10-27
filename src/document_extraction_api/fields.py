@@ -1,7 +1,9 @@
 """処理の定義（definition.py）が使う項目の型。
 
 Claude には、どの項目も「帳票に書かれている文字」か null で書かせる。数値や日付への変換は
-ここで行い、変換できない値は検証の誤りとして扱う（その項目を null にし、元の文字を残す）。
+ここで行う。変換できない数値は検証の誤りとして扱う（その項目を null にし、元の文字を issues に
+残す）。日付は、変換した値と元の文字の組（DateValue）で返す。変換できない日付は value を null に
+し、元の文字を raw に残して、problem に理由を書く。
 """
 
 import re
@@ -11,7 +13,14 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer, WithJsonSchema
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    PlainSerializer,
+    PrivateAttr,
+    WithJsonSchema,
+)
 
 _NULLABLE_STRING = WithJsonSchema({"anyOf": [{"type": "string"}, {"type": "null"}]})
 
@@ -73,12 +82,36 @@ _DATE_PATTERNS = (
 )
 
 
-def _parse_date(value: Any) -> Any:
-    value = _blank_to_none(value)
-    if value is None or isinstance(value, date):
+class DateValue(BaseModel):
+    """日付の項目の値。value は読み取った日付、raw は帳票に書かれていた文字。"""
+
+    value: date | None
+    raw: str | None
+    _problem: str | None = PrivateAttr(default=None)
+
+    @property
+    def problem(self) -> str | None:
+        """raw を日付に変換できなかった理由。変換できたか、書かれていなければ None。"""
+        return self._problem
+
+
+def _to_date_value(value: Any) -> Any:
+    if isinstance(value, DateValue):
         return value
+    value = _blank_to_none(value)
+    if value is None:
+        return DateValue(value=None, raw=None)
     if not isinstance(value, str):
         raise ValueError("日付として読めない")
+    try:
+        return DateValue(value=_parse_date(value), raw=value)
+    except ValueError as error:
+        unreadable = DateValue(value=None, raw=value)
+        unreadable._problem = str(error)
+        return unreadable
+
+
+def _parse_date(value: str) -> date:
     text = re.sub(r"\s", "", _normalize(value))
     for pattern in _DATE_PATTERNS:
         match = pattern.fullmatch(text)
@@ -106,5 +139,9 @@ Number = Annotated[
 ]
 """数量・金額など。桁区切りのカンマと全角数字は受け付ける。結果では文字列の数値になる。"""
 
-Date = Annotated[date | None, BeforeValidator(_parse_date), _NULLABLE_STRING]
-"""日付。西暦（2026-10-27、2026/10/27、2026年10月27日）と令和・平成を受け付ける。"""
+Date = Annotated[DateValue, BeforeValidator(_to_date_value), _NULLABLE_STRING]
+"""日付。西暦（2026-10-27、2026/10/27、2026年10月27日）と令和・平成を受け付ける。
+
+結果では {"value": "2026-10-27", "raw": "令和8年10月27日"} の形になる。書かれていない日付は
+value も raw も null。変換できない日付は value が null で、要確認になる。
+"""
