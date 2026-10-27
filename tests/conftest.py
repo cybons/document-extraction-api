@@ -76,7 +76,7 @@ def settings(tmp_path, processes_dir) -> Settings:
     return Settings(
         sites={
             "site_a": Site("site_a", "claude-key-a", frozenset({hash_client_key(KEY_A)})),
-            "site_b": Site("site_b", None, frozenset({hash_client_key(KEY_B)})),
+            "site_b": Site("site_b", "claude-key-b", frozenset({hash_client_key(KEY_B)})),
         },
         data_dir=tmp_path / "data",
         processes_dir=processes_dir,

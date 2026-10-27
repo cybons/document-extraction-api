@@ -351,6 +351,7 @@ processes_dir = "processes"
 log_file = "logs/service.log"
 port = {port}
 [sites.site_a]
+claude_api_key = "sk-test"
 client_key_sha256 = ["{"0" * 64}"]
 """,
         encoding="utf-8",
@@ -426,3 +427,13 @@ async def test_09_task_without_amounts_runs_end_to_end(settings):
     assert extractor.calls[0]["schema"]["properties"] == {
         "title": {"anyOf": [{"type": "string"}, {"type": "null"}]}
     }
+
+
+def test_07d_missing_claude_key_stops_startup(tmp_path, processes_dir):
+    path = _settings_file(tmp_path, 0)
+    path.write_text(path.read_text(encoding="utf-8").replace('claude_api_key = "sk-test"\n', ""))
+    try:
+        assert serve(path) == 1
+    finally:
+        logging.getLogger().handlers.clear()
+    assert "claude_api_key" in (tmp_path / "logs" / "service.log").read_text(encoding="utf-8")

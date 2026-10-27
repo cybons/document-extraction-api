@@ -77,4 +77,7 @@ class AnthropicExtractor:
             raise ClaudeUnavailable("claude_connection_error") from error
         except anthropic.APIStatusError as error:
             raise ClaudeUnavailable(f"claude_http_{error.status_code}") from error
+        except anthropic.AnthropicError as error:
+            # 認証情報が見つからない、応答を解釈できない、など
+            raise ClaudeUnavailable("claude_error") from error
         return ClaudeResponse(raw=message.to_dict())

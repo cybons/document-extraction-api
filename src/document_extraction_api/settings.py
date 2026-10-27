@@ -13,8 +13,7 @@ class SettingsError(Exception):
 @dataclass(frozen=True)
 class Site:
     name: str
-    claude_api_key: str | None
-    """None なら、Anthropic SDK の既定の探し方（環境変数など）で認証する。"""
+    claude_api_key: str
     client_key_hashes: frozenset[str]
 
 
@@ -74,7 +73,9 @@ def parse_settings(raw: dict, base_dir: Path) -> Settings:
         if overlap := hashes & seen:
             raise SettingsError(f"同じ呼び出し元キーが複数の拠点にある: {sorted(overlap)}")
         seen |= hashes
-        sites[name] = Site(name, site_raw.get("claude_api_key") or None, hashes)
+        if not site_raw.get("claude_api_key"):
+            raise SettingsError(f"拠点 {name} に claude_api_key がない")
+        sites[name] = Site(name, site_raw["claude_api_key"], hashes)
 
     prices = {
         model: Price(float(p["input_per_mtok"]), float(p["output_per_mtok"]))

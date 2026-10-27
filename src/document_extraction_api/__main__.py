@@ -12,6 +12,7 @@ import os
 import secrets
 import socket
 import sys
+import tomllib
 from pathlib import Path
 
 from .settings import Settings, SettingsError, hash_client_key, load_settings
@@ -110,11 +111,23 @@ def prepare(settings: Settings):
     return app, sock, lock
 
 
+def _log_file_hint(settings_path: Path) -> Path | None:
+    """設定全体が正しくなくても、ログの出力先だけは読めれば使う。"""
+    try:
+        value = tomllib.loads(settings_path.read_text(encoding="utf-8")).get("log_file")
+    except OSError, tomllib.TOMLDecodeError:
+        return None
+    if not isinstance(value, str):
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else settings_path.parent / path
+
+
 def serve(settings_path: Path) -> int:
-    setup_logging(None)
     try:
         settings = load_settings(settings_path)
     except SettingsError as error:
+        setup_logging(_log_file_hint(settings_path))
         logger.error("起動に失敗: %s", error)
         return 1
     setup_logging(settings.log_file)
