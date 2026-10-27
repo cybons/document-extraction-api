@@ -473,9 +473,14 @@ let key = null;
 let view = "action";
 let nextBefore = null;
 let listToken = 0;
+// キーを入れ直したり条件を変えたりした後に、前の要求の応答で画面を上書きしないための番号
+let session = 0;
+let dashToken = 0;
+let techToken = 0;
 let current = null;
 let blobUrl = null;
-let taskNames = {};
+// 項目名・タスクIDは任意の文字（constructor など）なので、Object ではなく Map で引く
+let taskNames = new Map();
 
 // ---------- 小さな道具 ----------
 function el(tag, text, className) {
@@ -568,7 +573,7 @@ function modelName(model) {
   const match = /^claude-([a-z]+)-(\d+)-(\d+)/.exec(model || "");
   return match ? `Claude ${match[1][0].toUpperCase()}${match[1].slice(1)} ${match[2]}.${match[3]}` : (model || "—");
 }
-const taskLabel = (taskId, name) => name || taskNames[taskId] || taskId;
+const taskLabel = (taskId, name) => name || taskNames.get(taskId) || taskId;
 function failure(code) {
   for (const [pattern, title, next] of FAILURES) if (pattern.test(code || "")) return { title, next };
   return { title: "読み取りに失敗しました", next: "管理者に連絡してください。" };
@@ -613,6 +618,8 @@ const iso = (date) => date.toISOString();
 
 // ---------- 入口 ----------
 function showLogin(message) {
+  session++; listToken++; dashToken++; techToken++;
+  current = null;
   key = null;
   saveKey(null);
   $("app").hidden = true;
@@ -623,11 +630,13 @@ function showLogin(message) {
 }
 
 async function start() {
+  const mine = ++session;
   const all = await json("/api/v1/summary");
+  if (mine !== session) return;
   $("login").hidden = true;
   $("app").hidden = false;
   $("site").textContent = all.site_name;
-  taskNames = Object.fromEntries(all.tasks.map((task) => [task.task_id, task.task_name]));
+  taskNames = new Map(all.tasks.map((task) => [task.task_id, task.task_name]));
   const select = $("task");
   select.replaceChildren(new Option("すべて", ""));
   for (const task of all.tasks) select.add(new Option(taskLabel(task.task_id, task.task_name), task.task_id));
@@ -647,16 +656,18 @@ async function loadDashboard() {
   $("title").textContent = p.title;
   $("dash-error").hidden = true;
   const task = $("task").value;
+  const token = ++dashToken;
   const list = loadJobs(true);
   try {
     const [summary, previous] = await Promise.all([
       json("/api/v1/summary", { from: iso(p.from), to: iso(p.to), task_id: task, utc_offset: "+09:00" }),
       json("/api/v1/summary", { from: iso(p.prev[0]), to: iso(p.prev[1]), task_id: task }),
     ]);
+    if (token !== dashToken) return;
     renderKpis(summary, previous, p);
     renderChart(summary, p);
     renderKinds(summary);
-  } catch (error) { showError($("dash-error"), error); }
+  } catch (error) { if (token === dashToken) showError($("dash-error"), error); }
   await list;
 }
 
@@ -679,7 +690,10 @@ function renderKpis(summary, previous, p) {
     box.className = "card kpi fine";
     const label = el("div", "対応が必要なものはありません", "label");
     label.prepend(icon("check"));
-    box.append(label, el("div", summary.jobs ? "すべて読み取れています" : "この期間の読み取りはまだありません", "value"));
+    const waiting = c.queued + c.processing;
+    const text = !summary.jobs ? "この期間の読み取りはまだありません"
+      : waiting ? `${count(waiting)} 件を読み取り中です` : "すべて読み取れています";
+    box.append(label, el("div", text, "value"));
   }
 
   $("k-count").textContent = count(summary.jobs);
@@ -903,10 +917,16 @@ async function openDetail(jobId) {
   $("detail-body").hidden = true;
   $("detail-loading").hidden = false;
   clearFile();
+  techToken++;
+  const mine = session;
+  const stale = () => mine !== session || location.hash !== `#job=${jobId}`;
   let job;
   try { job = await json(jobPath(jobId, "detail")); }
-  catch (error) { $("detail-loading").hidden = true; showError($("detail-error"), error); return; }
-  if (location.hash !== `#job=${jobId}`) return;
+  catch (error) {
+    if (stale()) return;
+    $("detail-loading").hidden = true; showError($("detail-error"), error); return;
+  }
+  if (stale()) return;
   $("detail-loading").hidden = true;
   current = job;
   $("d-name").textContent = job.file_name ?? "（名前なし）";
@@ -956,9 +976,9 @@ function renderBanner(job) {
 
 // 読み取った内容。項目の名前は処理の定義（labels）から取り、なければ項目のキーを出す
 const isDatePair = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
-  && Object.keys(value).length === 2 && "value" in value && "raw" in value;
+  && Object.keys(value).length === 2 && Object.hasOwn(value, "value") && Object.hasOwn(value, "raw");
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value) && !isDatePair(value);
-const labelOf = (pattern, name, ctx) => ctx.labels[pattern] ?? name;
+const labelOf = (pattern, name, ctx) => ctx.labels.get(pattern) ?? name;
 
 function renderValues(job) {
   const box = $("values");
@@ -969,11 +989,13 @@ function renderValues(job) {
     box.append(el("div", job.status === "failed" ? "読み取った内容はありません。" : "まだ読み取っていません。", "empty"));
     return;
   }
-  const issues = {};
+  const issues = new Map();
   for (const issue of job.issues) {
-    if (issue && typeof issue.path === "string") (issues[issue.path] ??= []).push(issue);
+    if (!issue || typeof issue.path !== "string") continue;
+    if (!issues.has(issue.path)) issues.set(issue.path, []);
+    issues.get(issue.path).push(issue);
   }
-  const ctx = { labels: job.labels || {}, issues };
+  const ctx = { labels: new Map(Object.entries(job.labels || {})), issues };
   if (!isRecord(job.data)) {
     box.append(codeBlock(JSON.stringify(job.data, null, 2)));
     return;
@@ -997,7 +1019,7 @@ function renderRecordInto(box, record, path, pattern, ctx) {
     const tr = body.insertRow();
     const v = el("td", null, "v");
     v.append(renderValue(value, here, herePattern, ctx));
-    const issues = ctx.issues[here];
+    const issues = ctx.issues.get(here);
     if (issues) {
       tr.className = "flag";
       for (const issue of issues) {
@@ -1011,7 +1033,7 @@ function renderRecordInto(box, record, path, pattern, ctx) {
 }
 
 function renderValue(value, path, pattern, ctx) {
-  const issues = ctx.issues[path] || [];
+  const issues = ctx.issues.get(path) || [];
   const raw = issues.find((issue) => issue.raw !== null && issue.raw !== undefined)?.raw;
   const span = el("span");
   if (value === null || value === undefined) {
@@ -1061,8 +1083,8 @@ function recordTable(rows, path, pattern, ctx) {
     for (const name of columns) {
       const here = `${path}[${i}].${name}`;
       const td = el("td");
-      td.append(name in row ? renderValue(row[name], here, `${pattern}.${name}`, ctx) : el("span", "—", "none"));
-      const issues = ctx.issues[here];
+      td.append(Object.hasOwn(row, name) ? renderValue(row[name], here, `${pattern}.${name}`, ctx) : el("span", "—", "none"));
+      const issues = ctx.issues.get(here);
       if (issues) {
         td.className = "flag";
         td.title = issues.map((issue) => issue.message).join("\n");
@@ -1130,9 +1152,13 @@ function codeBlock(text) {
 
 async function showTech(load) {
   const box = $("tech-view");
+  const token = ++techToken;
   box.replaceChildren(el("div", "読み込み中…", "muted"));
-  try { box.replaceChildren(...await load()); }
-  catch (error) {
+  try {
+    const nodes = await load();
+    if (token === techToken) box.replaceChildren(...nodes);
+  } catch (error) {
+    if (token !== techToken) return;
     if (error instanceof Unauthorized) { showLogin("キーが正しくありません。入れ直してください。"); return; }
     box.replaceChildren(el("div", "読み込めませんでした：" + error.message, "muted"));
   }
@@ -1159,6 +1185,7 @@ async function loadFile(job) {
       viewer.replaceChildren(el("p", "この種類のファイル（TIFF など）はブラウザで表示できません。ダウンロードして開いてください。"));
     }
   } catch (error) {
+    if (current !== job) return;
     if (error instanceof Unauthorized) { showLogin("キーが正しくありません。入れ直してください。"); return; }
     viewer.replaceChildren(el("p", "元のファイルを読み込めませんでした：" + error.message));
   }
