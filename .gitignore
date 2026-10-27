@@ -16,3 +16,4 @@ logs/
 .DS_Store
 dist/
 .claude/worktrees/
+settings.toml
