@@ -232,3 +232,25 @@ def test_schemas_sent_to_claude_use_supported_keywords(root, processes_dir):
     assert list(registry)
     for process in registry:
         _walk_schema(process.schema)
+
+
+def test_heavy_pages_are_sent_as_jpeg(tmp_path, settings):
+    from PIL import Image
+
+    from document_extraction_api.render import render_pages
+
+    source = tmp_path / "scan.png"
+    Image.effect_noise((2000, 2600), 60).convert("RGB").save(source)
+    pages = render_pages(source, tmp_path / "pages", settings)
+    assert [p.suffix for p in pages] == [".jpg"]
+
+
+async def test_pages_over_the_request_limit_are_not_sent(settings):
+    extractor = FakeExtractor()
+    app = make_app(settings, extractor, max_request_image_bytes=100)
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+        await run_one(app)
+        result = (await http.get(f"/api/v1/jobs/{job_id}", headers={"X-API-Key": KEY_A})).json()
+    assert result["error"] == {"code": "too_large"}
+    assert extractor.calls == []

@@ -87,7 +87,7 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 
 | 場合 | `error.code` |
 |---|---|
-| ファイルが読めない | `unreadable_file`、`too_many_pages`（`max_pages` を超える）、`render_timeout` |
+| ファイルが読めない | `unreadable_file`、`too_many_pages`（`max_pages` を超える）、`too_large`（画像にすると Claude API の要求の上限を超える）、`render_timeout` |
 | Claude が応答しない | `claude_timeout`、`claude_connection_error`、`claude_http_<状態>`、`claude_refused`、`claude_no_response`（中断が `max_attempts` 回続いた）、`job_timeout` |
 | 応答が JSON にならない | `invalid_json`、`response_truncated`（`max_tokens` で途切れた） |
 
@@ -131,6 +131,7 @@ def check(data: Output) -> list[Issue]:   # 任意。指摘があれば要確認
 
 - ジョブは SQLite（`data_dir/jobs.sqlite3`）に記録する。ファイルと Claude の生の応答は `data_dir/jobs/<job_id>/` に置く。
 - 同時に処理するのは1件。前処理（PDF の画像化、ページの回転、写真の向き、透過の白背景合成）は子プロセスで行い、時間を超えたらプロセスツリーごと終了する。子プロセス自身も制限時間を持つ。
+- ページは長辺 2576px までの PNG にする。スキャンなどで 1.5MB を超えるページは JPEG（品質90）にする。Claude API の上限は、画像1枚 10MB・要求全体 32MB。
 - Claude へ送る前に送信時刻を記録し、受け取った応答は DB より先にディスクへ保存する。処理中のまま止まったジョブは、起動時と手が空いたときに立て直す。
   - 応答が保存済みなら、Claude を呼ばずに結果を確定する。
   - まだ送っていなければ、待ちに戻す。

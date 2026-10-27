@@ -36,13 +36,16 @@ class Settings:
     max_tokens: int = 32000
     claude_timeout_seconds: float = 300
     claude_max_retries: int = 2
-    job_timeout_seconds: float = 900
+    job_timeout_seconds: float = 1200
+    """Claude の呼び出し全体（SDK の再試行を含む）の上限。"""
     max_attempts: int = 3
     max_upload_bytes: int = 20 * 1024 * 1024
     upload_slots: int = 2
     max_pages: int = 20
     render_dpi: int = 200
     image_long_edge: int = 2576
+    max_request_image_bytes: int = 28 * 1024 * 1024
+    """Claude へ送る画像の合計（base64）の上限。API の要求の上限は 32MB。"""
     render_timeout_seconds: float = 120
     prices: dict[str, Price] = field(default_factory=dict)
 
@@ -93,6 +96,10 @@ def parse_settings(raw: dict, base_dir: Path) -> Settings:
     if "log_file" in raw:
         raw["log_file"] = resolve(raw["log_file"])
     try:
-        return Settings(sites=sites, prices=prices, **raw)
+        settings = Settings(sites=sites, prices=prices, **raw)
     except TypeError as error:
         raise SettingsError(f"設定の項目が正しくない: {error}") from error
+    if settings.max_pages > 20 and settings.image_long_edge > 2000:
+        # Claude API は、画像が20枚を超える要求では1枚の長辺を 2000px までに制限する
+        raise SettingsError("max_pages が20を超えるときは image_long_edge を2000以下にする")
+    return settings

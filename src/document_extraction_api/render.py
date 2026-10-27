@@ -22,7 +22,7 @@ class RenderError(Exception):
 
 
 def render_pages(source: Path, out_dir: Path, settings: Settings) -> list[Path]:
-    """ページごとの PNG のパスを返す。失敗したら RenderError。"""
+    """ページごとの画像（PNG か JPEG）のパスを返す。失敗したら RenderError。"""
     args = [
         str(source),
         str(out_dir),
@@ -39,7 +39,7 @@ def render_pages(source: Path, out_dir: Path, settings: Settings) -> list[Path]:
         raise RenderError("too_many_pages")
     if returncode != 0:
         raise RenderError("unreadable_file")
-    pages = sorted(out_dir.glob("page-*.png"))
+    pages = sorted(out_dir.glob("page-*.*"))
     if not pages:
         raise RenderError("unreadable_file")
     return pages

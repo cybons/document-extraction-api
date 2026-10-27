@@ -437,3 +437,24 @@ def test_07d_missing_claude_key_stops_startup(tmp_path, processes_dir):
     finally:
         logging.getLogger().handlers.clear()
     assert "claude_api_key" in (tmp_path / "logs" / "service.log").read_text(encoding="utf-8")
+
+
+async def test_04b_slow_recording_after_response_is_not_cut_off(settings, monkeypatch):
+    extractor = FakeExtractor(claude_message(GOOD))
+    app = make_app(settings, extractor, job_timeout_seconds=1)
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+
+    original = store.finish
+
+    def slow_finish(*args, **kwargs):
+        time.sleep(2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "finish", slow_finish)
+    await run_one(app)
+    job = store.get(job_id)
+    assert job.status == db.SUCCEEDED
+    assert job.data["total"] == "100"
+    assert len(extractor.calls) == 1

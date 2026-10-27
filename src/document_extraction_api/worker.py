@@ -87,9 +87,7 @@ class Worker:
 
     async def process(self, job: db.Job) -> None:
         try:
-            await asyncio.wait_for(self._process(job), self.settings.job_timeout_seconds)
-        except TimeoutError:
-            await self._finish_safely(job, db.FAILED, error=_error("job_timeout"))
+            await self._process(job)
         except Exception as error:
             logger.error("ジョブの処理中に例外: %s %s", job.id, type(error).__name__)
             if (job_dir(self.settings, job.id) / RESPONSE_FILE).exists():
@@ -121,13 +119,24 @@ class Worker:
             await self._finish_safely(job, db.FAILED, error=_error(error.code))
             return
         images = [page.read_bytes() for page in pages]
+        if sum(len(image) for image in images) * 4 / 3 > self.settings.max_request_image_bytes:
+            # Claude API の要求の上限（32MB）を超えるので送らない
+            await self._finish_safely(job, db.FAILED, error=_error("too_large"))
+            return
 
         await asyncio.to_thread(self.store.mark_sent, job.id)
         site = self.settings.sites[job.site]
         try:
-            response = await self.extractor.extract(site, process.prompt, process.schema, images)
+            # 制限時間は Claude の呼び出しだけにかける。応答を受け取った後の保存と確定は打ち切らない
+            response = await asyncio.wait_for(
+                self.extractor.extract(site, process.prompt, process.schema, images),
+                self.settings.job_timeout_seconds,
+            )
         except ClaudeUnavailable as error:
             await self._finish_safely(job, db.FAILED, error=_error(error.code))
+            return
+        except TimeoutError:
+            await self._finish_safely(job, db.FAILED, error=_error("job_timeout"))
             return
 
         await asyncio.to_thread(_write_atomic, directory / RESPONSE_FILE, response.raw)

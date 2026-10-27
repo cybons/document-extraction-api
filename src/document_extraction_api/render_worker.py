@@ -4,6 +4,7 @@
 終了コード: 0 成功 / 2 読めないファイル / 3 ページ数が上限を超える / 124 制限時間切れ
 """
 
+import io
 import os
 import sys
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 EXIT_UNREADABLE = 2
 EXIT_TOO_MANY_PAGES = 3
 EXIT_TIMEOUT = 124
+PNG_LIMIT_BYTES = 1_500_000
 
 
 class _TooManyPages(Exception):
@@ -42,7 +44,17 @@ def render(source: Path, out_dir: Path, max_pages: int, dpi: int, long_edge: int
         else _image_pages(source, max_pages)
     )
     for number, image in enumerate(images, start=1):
-        _fit(_on_white(image), long_edge).save(out_dir / f"page-{number:03d}.png")
+        _save(_fit(_on_white(image), long_edge), out_dir / f"page-{number:03d}")
+
+
+def _save(image, stem: Path) -> None:
+    """文字の輪郭を保つため PNG を基本にし、スキャンなどで重くなるページだけ JPEG にする。"""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    if buffer.tell() <= PNG_LIMIT_BYTES:
+        stem.with_suffix(".png").write_bytes(buffer.getvalue())
+    else:
+        image.save(stem.with_suffix(".jpg"), format="JPEG", quality=90)
 
 
 def _pdf_pages(source: Path, max_pages: int, dpi: int, long_edge: int):

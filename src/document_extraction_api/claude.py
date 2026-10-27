@@ -53,7 +53,7 @@ class AnthropicExtractor:
                 "type": "image",
                 "source": {
                     "type": "base64",
-                    "media_type": "image/png",
+                    "media_type": "image/jpeg" if page.startswith(b"\xff\xd8") else "image/png",
                     "data": base64.standard_b64encode(page).decode("ascii"),
                 },
             }
