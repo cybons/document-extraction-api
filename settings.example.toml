@@ -14,11 +14,14 @@ max_tokens = 32000
 # 拠点ごとに、Claude API のキーと、呼び出し側に渡すキーのハッシュを書く。
 # 呼び出し側のキーは `python -m document_extraction_api new-key` で作る。
 # claude_api_key は拠点ごとに必須。全拠点で同じキーを書いてもよい。
+# name は閲覧画面に出す名前（任意。なければ [sites.<名前>] の名前を出す）。
 [sites.parent]
+name = "親会社"
 claude_api_key = "sk-ant-..."
 client_key_sha256 = ["<new-key が出したハッシュ>"]
 
 [sites.subsidiary]
+name = "子会社"
 claude_api_key = "sk-ant-..."
 client_key_sha256 = ["<new-key が出したハッシュ>"]
 

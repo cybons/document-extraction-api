@@ -16,6 +16,8 @@ class Site:
     name: str
     claude_api_key: str
     client_key_hashes: frozenset[str]
+    display_name: str | None = None
+    """画面に出す名前（設定の name）。なければ name を出す。"""
 
 
 @dataclass(frozen=True)
@@ -90,7 +92,10 @@ def _parse_settings(raw: dict, base_dir: Path) -> Settings:
         seen |= hashes
         if not site_raw.get("claude_api_key"):
             raise SettingsError(f"拠点 {name} に claude_api_key がない")
-        sites[name] = Site(name, site_raw["claude_api_key"], hashes)
+        display_name = site_raw.get("name")
+        if display_name is not None and (not isinstance(display_name, str) or not display_name):
+            raise SettingsError(f"[sites.{name}] の name は空でない文字にする")
+        sites[name] = Site(name, site_raw["claude_api_key"], hashes, display_name)
 
     prices = {
         model: Price(float(p["input_per_mtok"]), float(p["output_per_mtok"]))
