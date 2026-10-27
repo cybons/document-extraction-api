@@ -653,7 +653,7 @@ async function start() {
   }
   route();
   await loadDashboard();
-  return true;
+  return mine === session;
 }
 
 // ---------- ダッシュボード ----------
@@ -1203,9 +1203,10 @@ async function loadFile(job, live) {
 // ---------- 操作 ----------
 $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  key = $("key").value.trim();
+  const entered = $("key").value.trim();
+  key = entered;
   try {
-    if (await start()) saveKey(key);
+    if (await start()) saveKey(entered);
   } catch (error) {
     if (error instanceof Unauthorized) showLogin("キーが正しくありません。");
     else $("login-error").textContent = "読み込めませんでした：" + error.message;
