@@ -1,6 +1,7 @@
 """ジョブの記録（SQLite）。呼び出しはすべて同期で、非同期側からはスレッドで呼ぶ。"""
 
 import json
+import math
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
@@ -191,14 +192,21 @@ class JobStore:
         """
         where, params = _period(site, start, end, task_id)
         condition = " AND ".join(where)
+        # トークン数は 0〜2**63-1 を記録するので、そのまま SUM すると SQLite の整数があふれる。
+        # 上下32ビットに分けて足し、Python で合わせる
+        tokens = ", ".join(
+            f"COALESCE(SUM({name} >> 32), 0) AS {name}_hi,"
+            f" COALESCE(SUM({name} & 4294967295), 0) AS {name}_lo"
+            for name in ("input_tokens", "output_tokens")
+        )
         # トークンを使ったのに費用が出ていないジョブ（単価の設定がないモデル）も数える
         totals = (
-            "COUNT(*) AS jobs, COALESCE(SUM(input_tokens), 0) AS input_tokens,"
-            " COALESCE(SUM(output_tokens), 0) AS output_tokens,"
-            " COALESCE(SUM(cost_usd), 0) AS cost_usd,"
+            f"COUNT(*) AS jobs, {tokens}, COALESCE(SUM(cost_usd), 0) AS cost_usd,"
             " SUM(input_tokens IS NOT NULL AND cost_usd IS NULL) AS unpriced_jobs"
         )
         with closing(self.connect()) as conn:
+            # 1回の集計の中で、件数と内訳が同じ時点の DB を見るように、読み取りを1つにまとめる
+            conn.execute("BEGIN")
             total = conn.execute(f"SELECT {totals} FROM jobs WHERE {condition}", params).fetchone()
             statuses = conn.execute(
                 f"SELECT status, COUNT(*) AS n FROM jobs WHERE {condition} GROUP BY status", params
@@ -220,6 +228,7 @@ class JobStore:
                 " GROUP BY day, status ORDER BY day",
                 (shift, *params),
             ).fetchall()
+            conn.execute("COMMIT")
         return {
             "status_counts": _status_counts(statuses),
             **_totals(total),
@@ -341,19 +350,24 @@ def _days(rows: list[sqlite3.Row]) -> list[dict]:
         {
             "date": day,
             "jobs": sum(r["n"] for r in group),
-            "cost_usd": sum(r["cost_usd"] for r in group),
+            "cost_usd": _finite(sum(r["cost_usd"] for r in group)),
             "status_counts": _status_counts(group),
         }
         for day, group in days.items()
     ]
 
 
+def _finite(cost: float) -> float | None:
+    """1件ずつは有限の費用でも、足すと無限になりうる。JSON で返せないので、出ないものとする。"""
+    return cost if math.isfinite(cost) else None
+
+
 def _totals(row: sqlite3.Row) -> dict:
     return {
         "jobs": row["jobs"],
-        "input_tokens": row["input_tokens"],
-        "output_tokens": row["output_tokens"],
-        "cost_usd": row["cost_usd"],
+        "input_tokens": (row["input_tokens_hi"] << 32) + row["input_tokens_lo"],
+        "output_tokens": (row["output_tokens_hi"] << 32) + row["output_tokens_lo"],
+        "cost_usd": _finite(row["cost_usd"]),
         "unpriced_jobs": row["unpriced_jobs"] or 0,
     }
 

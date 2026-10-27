@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import uuid
 from contextlib import closing
 from dataclasses import replace
 
@@ -15,6 +16,7 @@ from conftest import (
     FakeExtractor,
     claude_message,
     client,
+    fastapi_app,
     make_app,
     png_bytes,
     run_one,
@@ -504,3 +506,72 @@ def test_invalid_names_are_rejected(tmp_path):
     }
     with pytest.raises(SettingsError):
         parse_settings(raw, tmp_path)
+
+
+async def test_summary_adds_token_counts_beyond_the_sqlite_integer_range(settings):
+    big = claude_message(TYPED)
+    big["usage"]["input_tokens"] = 2**62
+    app = make_app(settings, FakeExtractor(big, big))
+    async with client(app) as http:
+        for colour in ((1, 0, 0), (2, 0, 0)):
+            await submit(http, content=png_bytes(colour))
+            await run_one(app)
+        response = await http.get("/api/v1/summary", headers=A)
+    assert response.status_code == 200
+    summary = response.json()
+    assert summary["input_tokens"] == 2**63
+    assert summary["tasks"][0]["input_tokens"] == 2**63
+
+
+async def test_summary_cost_that_adds_up_to_infinity_is_not_given(jobs, settings):
+    http, _ = jobs
+    with closing(sqlite3.connect(settings.data_dir / "jobs.sqlite3")) as conn:
+        conn.execute("UPDATE jobs SET cost_usd=1.7e308 WHERE site='site_a'")
+        conn.commit()
+    response = await http.get("/api/v1/summary", headers=A, params={"utc_offset": "+00:00"})
+    assert response.status_code == 200
+    summary = response.json()
+    assert summary["cost_usd"] is None
+    assert summary["tasks"][1]["cost_usd"] is None
+
+
+async def test_summary_reads_one_moment_of_the_database(settings, monkeypatch):
+    """集計の途中で別のジョブが受け付けられても、件数と内訳が食い違わない。"""
+    app = make_app(settings, FakeExtractor(claude_message(TYPED)))
+    store = fastapi_app(app).state.store
+    connect = type(store).connect
+
+    class Interrupted:
+        def __init__(self, conn):
+            self.conn = conn
+            self.done = False
+
+        def execute(self, sql, *args):
+            result = self.conn.execute(sql, *args)
+            if not self.done and "AS jobs" in sql:
+                self.done = True
+                monkeypatch.setattr(type(store), "connect", connect)
+                store.create_or_find(
+                    uuid.uuid4().hex,
+                    "site_a",
+                    "title.extract",
+                    "x.png",
+                    uuid.uuid4().hex,
+                    "v",
+                    "m",
+                    lambda: None,
+                )
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+    async with client(app) as http:
+        await submit(http)
+        await run_one(app)
+        monkeypatch.setattr(type(store), "connect", lambda self: Interrupted(connect(self)))
+        summary = (await http.get("/api/v1/summary", headers=A)).json()
+        assert (await http.get("/api/v1/summary", headers=A)).json()["jobs"] == 2
+    assert summary["jobs"] == sum(summary["status_counts"].values()) == 1
+    assert sum(task["jobs"] for task in summary["tasks"]) == 1
+    assert sum(day["jobs"] for day in summary["days"]) == 1
