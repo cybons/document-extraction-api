@@ -147,6 +147,10 @@ def serve(settings_path: Path) -> int:
     try:
         server = uvicorn.Server(uvicorn.Config(app, log_config=None, access_log=True))
         server.run(sockets=[sock])
+    except KeyboardInterrupt:
+        # uvicorn は Ctrl+C で終了処理を済ませた後、受け取ったシグナルを投げ直す。止める操作なので
+        # ここで受け、Traceback を出さずに終わる
+        pass
     finally:
         lock.release()
     logger.info("停止")
