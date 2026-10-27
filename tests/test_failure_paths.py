@@ -218,6 +218,24 @@ async def test_02e_job_keeps_the_process_it_was_accepted_with(settings, processe
     assert extractor.calls[0]["prompt"] == "全部読む"
 
 
+async def test_02f_job_is_read_with_the_model_it_was_accepted_with(settings):
+    app = make_app(settings, FakeExtractor(), model="model-a")
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+
+    # モデルの設定を変えて再起動しても、待ちのジョブは受け付けたときのモデルで読む
+    extractor = FakeExtractor(claude_message(GOOD, model="model-a"))
+    restarted = make_app(settings, extractor, model="model-b")
+    await run_one(restarted)
+    assert extractor.calls[0]["model"] == "model-a"
+    assert store.get(job_id).model == "model-a"
+
+    app_a = make_app(settings, FakeExtractor(), model="model-a")
+    async with client(app_a) as http:
+        assert (await submit(http)).json()["job_id"] == job_id
+
+
 # 3. 認証のない要求に、アップロードの受付枠やメモリを使わせない（healthなどのパスも含む）。
 @pytest.mark.parametrize(
     ("method", "path"),

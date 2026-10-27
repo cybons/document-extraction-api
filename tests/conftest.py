@@ -111,8 +111,10 @@ class FakeExtractor:
         self.responses = list(responses)
         self.calls = []
 
-    async def extract(self, site, prompt, schema, pages):
-        self.calls.append({"site": site.name, "prompt": prompt, "schema": schema, "pages": pages})
+    async def extract(self, site, model, prompt, schema, pages):
+        self.calls.append(
+            {"site": site.name, "model": model, "prompt": prompt, "schema": schema, "pages": pages}
+        )
         response = self.responses.pop(0)
         if isinstance(response, BaseException):
             raise response

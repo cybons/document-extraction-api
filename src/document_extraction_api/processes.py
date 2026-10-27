@@ -183,12 +183,15 @@ def validate_output(process: Process, raw: Any) -> Validated:
             raise InvalidOutput() from again
     if process.check is not None:
         try:
-            found = process.check(model)
+            found = [
+                {"path": issue.path, "raw": None, "message": issue.message}
+                for issue in process.check(model)
+            ]
         except Exception as error:
             # check は処理ごとに書くコード。止まっても課金済みの結果は捨てず、要確認にする
-            found = [fields.Issue("", f"check が例外で止まった: {type(error).__name__}")]
-        for issue in found:
-            issues.append({"path": issue.path, "raw": None, "message": issue.message})
+            message = f"check が例外で止まった: {type(error).__name__}"
+            found = [{"path": "", "raw": None, "message": message}]
+        issues.extend(found)
     return Validated(model.model_dump(mode="json"), issues)
 
 

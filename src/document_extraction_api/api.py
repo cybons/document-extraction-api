@@ -14,6 +14,7 @@ import anyio
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from . import db
 from .auth import UPLOAD_PATH, AuthMiddleware
@@ -28,6 +29,10 @@ _SIGNATURES = (b"%PDF-", b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"II*\x00", b"MM
 
 
 class _UnsupportedFile(Exception):
+    pass
+
+
+class _FileTooLarge(Exception):
     pass
 
 
@@ -82,6 +87,9 @@ def create_app(
         task_id: Annotated[str, Form()],
     ):
         site = request.state.site
+        form = await request.form()  # FastAPI が読んだ結果を使う（本文は読み直さない）
+        if sum(isinstance(value, StarletteUploadFile) for _, value in form.multi_items()) != 1:
+            return _error(400, "invalid_request", "ファイルは1つだけ送る")
         process = registry.get(site, task_id)
         if process is None:
             return _error(404, "task_not_found", "この拠点では使えないタスク")
@@ -91,6 +99,8 @@ def create_app(
                 job, created = await anyio.to_thread.run_sync(
                     _accept, settings, store, site, process, file.file
                 )
+        except _FileTooLarge:
+            return _error(413, "file_too_large", "ファイルが大きすぎる")
         except _UnsupportedFile:
             return _error(415, "unsupported_file", "PDF・PNG・JPEG・TIFF・WebP のみ受け付ける")
         if created:
@@ -127,7 +137,11 @@ def _accept(
             raise _UnsupportedFile()
         with temp.open("wb") as out:
             chunk = head
+            size = 0
             while chunk:
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    raise _FileTooLarge()
                 digest.update(chunk)
                 out.write(chunk)
                 chunk = source.read(1024 * 1024)

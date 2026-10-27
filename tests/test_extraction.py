@@ -11,12 +11,14 @@ from conftest import (
     fastapi_app,
     make_app,
     pdf_bytes,
+    png_bytes,
     run_one,
     submit,
     write_process,
 )
 
 from document_extraction_api import db
+from document_extraction_api import worker as worker_module
 from document_extraction_api.claude import ClaudeUnavailable
 from document_extraction_api.processes import load_processes
 from document_extraction_api.worker import PROCESS_DIR, RESPONSE_FILE, job_dir
@@ -105,6 +107,50 @@ async def test_check_that_raises_marks_review_instead_of_failing(settings, proce
     assert result["data"] == {"title": "A"}
     assert result["issues"] == [
         {"path": "", "raw": None, "message": "check が例外で止まった: ZeroDivisionError"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        "def check(data):\n    return None\n",
+        "def check(data):\n    yield Issue('title', 'x')\n    raise RuntimeError('bug')\n",
+        "def check(data):\n    return [object()]\n",
+    ],
+)
+async def test_any_error_in_check_marks_review_and_finishes_the_job(settings, processes_dir, check):
+    definition = (
+        "from document_extraction_api.fields import Issue, Record, Text\n"
+        "TASK_ID = 'broken.extract'\n"
+        "class Output(Record):\n"
+        "    title: Text\n"
+    ) + check
+    write_process(processes_dir, "site_a", "broken", definition)
+    extractor = FakeExtractor(claude_message({"title": "A"}))
+    app = make_app(settings, extractor)
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        job_id = (await submit(http, task_id="broken.extract")).json()["job_id"]
+    await run_one(app)
+    fastapi_app(app).state.worker.recover()
+    job = store.get(job_id)
+    assert job.status == db.NEEDS_REVIEW
+    assert job.data == {"title": "A"}
+    assert job.issues[-1]["message"].startswith("check が例外で止まった")
+    assert len(extractor.calls) == 1
+    assert store.processing() == []
+
+
+async def test_unexpected_error_in_validation_marks_review(settings, monkeypatch):
+    def broken_validate(process, output):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(worker_module, "validate_output", broken_validate)
+    result = await _run(settings, {"title": "A"}, task_id="title.extract")
+    assert result["status"] == "needs_review"
+    assert result["data"] == {"title": "A"}
+    assert result["issues"] == [
+        {"path": "", "raw": None, "message": "検証が例外で止まった: RuntimeError"}
     ]
 
 
@@ -231,6 +277,39 @@ async def test_unsupported_file_and_missing_fields(settings):
     assert list((settings.data_dir / "tmp").iterdir()) == []
 
 
+@pytest.mark.parametrize("second_field", ["file", "other"])
+async def test_more_than_one_file_is_rejected(settings, second_field):
+    app = make_app(settings, FakeExtractor())
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        response = await http.post(
+            "/api/v1/documents/extract",
+            headers={"X-API-Key": KEY_A},
+            files=[
+                ("file", ("a.png", png_bytes((1, 0, 0)))),
+                (second_field, ("b.png", png_bytes())),
+            ],
+            data={"task_id": "typed.extract"},
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert store.claim_next() is None
+    assert not (settings.data_dir / "jobs").exists() or not any(
+        (settings.data_dir / "jobs").iterdir()
+    )
+
+
+async def test_file_over_the_upload_limit_is_rejected(settings):
+    app = make_app(settings, FakeExtractor(), max_upload_bytes=100)
+    store = fastapi_app(app).state.store
+    async with client(app) as http:
+        response = await submit(http, content=png_bytes(size=(200, 200)))
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "file_too_large"
+    assert store.claim_next() is None
+    assert list((settings.data_dir / "tmp").iterdir()) == []
+
+
 async def test_job_response_while_queued(settings):
     app = make_app(settings, FakeExtractor())
     async with client(app) as http:
@@ -309,6 +388,18 @@ def test_heavy_pages_are_sent_as_jpeg(tmp_path, settings):
 async def test_pages_over_the_request_limit_are_not_sent(settings):
     extractor = FakeExtractor()
     app = make_app(settings, extractor, max_request_image_bytes=100)
+    async with client(app) as http:
+        job_id = (await submit(http)).json()["job_id"]
+        await run_one(app)
+        result = (await http.get(f"/api/v1/jobs/{job_id}", headers={"X-API-Key": KEY_A})).json()
+    assert result["error"] == {"code": "too_large"}
+    assert extractor.calls == []
+
+
+async def test_page_over_the_single_image_limit_is_not_sent(settings, monkeypatch):
+    monkeypatch.setattr(worker_module, "MAX_IMAGE_BASE64_BYTES", 100)
+    extractor = FakeExtractor()
+    app = make_app(settings, extractor)
     async with client(app) as http:
         job_id = (await submit(http)).json()["job_id"]
         await run_one(app)

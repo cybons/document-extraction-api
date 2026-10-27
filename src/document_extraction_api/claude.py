@@ -25,7 +25,7 @@ class ClaudeResponse:
 
 class Extractor(Protocol):
     async def extract(
-        self, site: Site, prompt: str, schema: dict, pages: list[bytes]
+        self, site: Site, model: str, prompt: str, schema: dict, pages: list[bytes]
     ) -> ClaudeResponse: ...
 
 
@@ -46,7 +46,7 @@ class AnthropicExtractor:
         return self._clients[site.name]
 
     async def extract(
-        self, site: Site, prompt: str, schema: dict, pages: list[bytes]
+        self, site: Site, model: str, prompt: str, schema: dict, pages: list[bytes]
     ) -> ClaudeResponse:
         content: list[dict] = [
             {
@@ -62,7 +62,7 @@ class AnthropicExtractor:
         content.append({"type": "text", "text": prompt})
         try:
             async with self._client(site).messages.stream(
-                model=self._settings.model,
+                model=model,
                 max_tokens=self._settings.max_tokens,
                 output_config={
                     "effort": self._settings.effort,

@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 RESPONSE_FILE = "response.json"
 INPUT_FILE = "input"
 PROCESS_DIR = "process"
+MAX_IMAGE_BASE64_BYTES = 10_000_000
+"""Claude API の画像1枚の上限（base64 で 10MB）。設定では緩められない。"""
 
 
 def job_dir(settings: Settings, job_id: str) -> Path:
@@ -131,8 +133,12 @@ class Worker:
             await self._finish_safely(job, db.FAILED, error=_error(error.code))
             return
         images = [page.read_bytes() for page in pages]
-        if sum(len(image) for image in images) * 4 / 3 > self.settings.max_request_image_bytes:
-            # Claude API の要求の上限（32MB）を超えるので送らない
+        sizes = [_base64_length(image) for image in images]
+        if (
+            max(sizes) > MAX_IMAGE_BASE64_BYTES
+            or sum(sizes) > self.settings.max_request_image_bytes
+        ):
+            # Claude API の画像1枚（10MB）か要求全体（32MB）の上限を超えるので送らない
             await self._finish_safely(job, db.FAILED, error=_error("too_large"))
             return
 
@@ -141,7 +147,9 @@ class Worker:
         try:
             # 制限時間は Claude の呼び出しだけにかける。応答を受け取った後の保存と確定は打ち切らない
             response = await asyncio.wait_for(
-                self.extractor.extract(site, process.prompt, process.schema, images),
+                self.extractor.extract(
+                    site, job.requested_model, process.prompt, process.schema, images
+                ),
                 self.settings.job_timeout_seconds,
             )
         except ClaudeUnavailable as error:
@@ -199,9 +207,14 @@ class Worker:
             return
         try:
             validated = validate_output(process, output)
-        except InvalidOutput:
+        except Exception as error:
             # JSON としては読めたので失敗にしない。検証できなかった応答をそのまま返して要確認にする
-            issue = {"path": "", "raw": None, "message": "出力の形が定義と合わない"}
+            if isinstance(error, InvalidOutput):
+                message = "出力の形が定義と合わない"
+            else:
+                logger.error("検証で例外: %s %s", job.id, type(error).__name__)
+                message = f"検証が例外で止まった: {type(error).__name__}"
+            issue = {"path": "", "raw": None, "message": message}
             self.store.finish(job.id, db.NEEDS_REVIEW, data=output, issues=[issue], **record)
             return
         status = db.NEEDS_REVIEW if validated.issues else db.SUCCEEDED
@@ -234,6 +247,10 @@ def _error(code: str, attempts: int | None = None) -> dict:
     if attempts is not None:
         error["attempts"] = attempts
     return error
+
+
+def _base64_length(data: bytes) -> int:
+    return 4 * ((len(data) + 2) // 3)
 
 
 def _write_atomic(path: Path, value: dict) -> None:

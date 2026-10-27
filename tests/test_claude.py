@@ -79,7 +79,9 @@ async def test_request_shape_and_response(settings):
     http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     extractor = AnthropicExtractor(settings, http_client=http_client)
     page = png_bytes()
-    response = await extractor.extract(settings.sites["site_a"], "全部読む", SCHEMA, [page, page])
+    response = await extractor.extract(
+        settings.sites["site_a"], "claude-test", "全部読む", SCHEMA, [page, page]
+    )
 
     body = captured["body"]
     assert captured["headers"]["authorization"] == "Bearer claude-key-a"
@@ -115,5 +117,5 @@ async def test_api_errors_become_unavailable(settings):
         settings, http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     )
     with pytest.raises(ClaudeUnavailable) as raised:
-        await extractor.extract(settings.sites["site_a"], "p", SCHEMA, [png_bytes()])
+        await extractor.extract(settings.sites["site_a"], "claude-test", "p", SCHEMA, [png_bytes()])
     assert raised.value.code == "claude_http_529"

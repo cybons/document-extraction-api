@@ -45,9 +45,9 @@ curl -H "X-API-Key: <キー>" -F "file=@納品書.pdf" -F "task_id=delivery.extr
 | 状態 | 意味 |
 |---|---|
 | 401 `unauthorized` | キーがないか、正しくない |
-| 400 `invalid_request` | `file` か `task_id` がない |
+| 400 `invalid_request` | `file` か `task_id` がない、またはファイルが2つ以上ある |
 | 404 `task_not_found` | この拠点では使えないタスク |
-| 413 `file_too_large` | `max_upload_bytes` を超える |
+| 413 `file_too_large` | ファイルが `max_upload_bytes` を超える |
 | 415 `unsupported_file` | 受け付けないファイルの種類 |
 | 503 `busy` | 受付が混み合っている。少し待って送り直す |
 
@@ -82,18 +82,19 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 - 定義の形に合わない値（日付・金額・数量など、どの項目も）は `null` にし、元の文字を `issues` の `raw` に残して要確認にする。
 - Claude が読めずに `null` で返した項目は、`null` のまま。要確認にするかは、各処理の `check` が決める。
 - `versions.process` は処理のファイルの内容から作る版。`versions.model` は実際に読んだモデル。
+- 待ちのジョブは、受け付けたときの処理とモデルで読む。設定のモデルを変えても、変える前に受け付けたジョブには効かない。
 
 失敗にするのは、次の3つの場合だけ。
 
 | 場合 | `error.code` |
 |---|---|
-| ファイルが読めない | `unreadable_file`（Claude へ送る前の誤りや中断が `max_attempts` 回続いたときも）、`too_many_pages`（`max_pages` を超える）、`too_large`（画像にすると Claude API の要求の上限を超える）、`render_timeout` |
+| ファイルが読めない | `unreadable_file`（Claude へ送る前の誤りや中断が `max_attempts` 回続いたときも）、`too_many_pages`（`max_pages` を超える）、`too_large`（画像にすると Claude API の画像1枚か要求全体の上限を超える）、`render_timeout` |
 | Claude が応答しない | `claude_timeout`、`claude_connection_error`、`claude_http_<状態>`、`claude_error`（そのほかの呼び出しの誤り）、`claude_refused`、`claude_no_response`（送った後の中断が `max_attempts` 回続いた）、`job_timeout` |
 | 応答が JSON にならない | `invalid_json`、`response_truncated`（`max_tokens` で途切れた） |
 
 想定外の誤りも、起きた段階で上のどれかになる。Claude の応答を保存した後の想定外の誤りは失敗にせず、要確認にする。
 - 処理の `check` が例外で止まったときは、その旨を `issues` に入れて要確認にする。
-- 処理の定義を読み込めないとき、JSON は読めたが形が定義と合わないときは、検証していない応答を `data` に入れて要確認にする。
+- 処理の定義を読み込めないとき、JSON は読めたが形が定義と合わないとき、検証が想定外の例外で止まったときは、検証していない応答を `data` に入れて要確認にする。
 
 ## 処理を足す・直す
 
