@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.hypothesis/
 .coverage
 htmlcov/
 data/
@@ -16,3 +17,4 @@ logs/
 .DS_Store
 dist/
 .claude/worktrees/
+settings.toml
