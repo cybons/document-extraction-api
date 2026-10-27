@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     site TEXT NOT NULL,
     task_id TEXT NOT NULL,
     status TEXT NOT NULL,
+    file_name TEXT,
     file_sha256 TEXT NOT NULL,
     process_version TEXT NOT NULL,
     requested_model TEXT NOT NULL,
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs (site, task_id, file_sha256);
+CREATE INDEX IF NOT EXISTS jobs_site ON jobs (site, created_at);
 """
 
 
@@ -49,6 +51,7 @@ class Job:
     site: str
     task_id: str
     status: str
+    file_name: str | None
     file_sha256: str
     process_version: str
     requested_model: str
@@ -67,7 +70,8 @@ class Job:
 
 
 def now() -> str:
-    return datetime.now(UTC).isoformat()
+    # 閲覧の期間の絞り込みで文字列のまま比べるので、桁をそろえる
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 class JobStore:
@@ -91,6 +95,7 @@ class JobStore:
         job_id: str,
         site: str,
         task_id: str,
+        file_name: str | None,
         file_sha256: str,
         process_version: str,
         requested_model: str,
@@ -99,6 +104,7 @@ class JobStore:
         """同じ拠点・タスク・ファイル・処理の版・モデルのジョブ（失敗以外）があればそれを返す。
 
         なければ place_file() でファイルを置いてからジョブを登録する。戻り値の bool は新規かどうか。
+        既存のジョブを返すときは、ファイル名は最初に送られたときのまま。
         """
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -115,13 +121,15 @@ class JobStore:
                 place_file()
                 stamp = now()
                 conn.execute(
-                    "INSERT INTO jobs (id, site, task_id, status, file_sha256, process_version,"
-                    " requested_model, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO jobs (id, site, task_id, status, file_name, file_sha256,"
+                    " process_version, requested_model, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         job_id,
                         site,
                         task_id,
                         QUEUED,
+                        file_name,
                         file_sha256,
                         process_version,
                         requested_model,
@@ -141,6 +149,65 @@ class JobStore:
         with closing(self.connect()) as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return _job(row) if row else None
+
+    def list_jobs(
+        self,
+        site: str,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        status: str | None = None,
+        task_id: str | None = None,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[Job]:
+        """拠点のジョブを新しい順に返す。before はページ送りの手がかり（前のページの最後の id）。"""
+        where, params = _period(site, start, end)
+        if status is not None:
+            where.append("status=?")
+            params.append(status)
+        if task_id is not None:
+            where.append("task_id=?")
+            params.append(task_id)
+        if before is not None:
+            where.append("id<?")
+            params.append(before)
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def summary(self, site: str, *, start: str | None = None, end: str | None = None) -> dict:
+        """拠点のジョブの状態ごとの件数、トークンと費用の合計、タスクごとの内訳。"""
+        where, params = _period(site, start, end)
+        condition = " AND ".join(where)
+        # トークンを使ったのに費用が出ていないジョブ（単価の設定がないモデル）も数える
+        totals = (
+            "COUNT(*) AS jobs, COALESCE(SUM(input_tokens), 0) AS input_tokens,"
+            " COALESCE(SUM(output_tokens), 0) AS output_tokens,"
+            " COALESCE(SUM(cost_usd), 0) AS cost_usd,"
+            " SUM(input_tokens IS NOT NULL AND cost_usd IS NULL) AS unpriced_jobs"
+        )
+        with closing(self.connect()) as conn:
+            total = conn.execute(f"SELECT {totals} FROM jobs WHERE {condition}", params).fetchone()
+            statuses = conn.execute(
+                f"SELECT status, COUNT(*) AS n FROM jobs WHERE {condition} GROUP BY status", params
+            ).fetchall()
+            tasks = conn.execute(
+                f"SELECT task_id, {totals} FROM jobs WHERE {condition}"
+                " GROUP BY task_id ORDER BY task_id",
+                params,
+            ).fetchall()
+        return {
+            "status_counts": {
+                name: 0 for name in (QUEUED, PROCESSING, SUCCEEDED, NEEDS_REVIEW, FAILED)
+            }
+            | {row["status"]: row["n"] for row in statuses},
+            **_totals(total),
+            "tasks": [{"task_id": row["task_id"], **_totals(row)} for row in tasks],
+        }
 
     def claim_next(self) -> Job | None:
         """最も古い待ちのジョブを処理中にして返す。"""
@@ -216,12 +283,34 @@ class JobStore:
             conn.execute(f"UPDATE jobs SET {columns} WHERE id=?", (*values.values(), job_id))
 
 
+def _period(site: str, start: str | None, end: str | None) -> tuple[list[str], list[Any]]:
+    where, params = ["site=?"], [site]
+    if start is not None:
+        where.append("created_at>=?")
+        params.append(start)
+    if end is not None:
+        where.append("created_at<?")
+        params.append(end)
+    return where, params
+
+
+def _totals(row: sqlite3.Row) -> dict:
+    return {
+        "jobs": row["jobs"],
+        "input_tokens": row["input_tokens"],
+        "output_tokens": row["output_tokens"],
+        "cost_usd": row["cost_usd"],
+        "unpriced_jobs": row["unpriced_jobs"] or 0,
+    }
+
+
 def _job(row: sqlite3.Row) -> Job:
     return Job(
         id=row["id"],
         site=row["site"],
         task_id=row["task_id"],
         status=row["status"],
+        file_name=row["file_name"],
         file_sha256=row["file_sha256"],
         process_version=row["process_version"],
         requested_model=row["requested_model"],

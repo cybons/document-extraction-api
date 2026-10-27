@@ -95,6 +95,7 @@ def test_any_response_finishes_the_job_and_can_be_returned(
         uuid.uuid4().hex,
         "site_a",
         task or "typed.extract",
+        "doc.png",
         uuid.uuid4().hex,
         "v",
         "m",

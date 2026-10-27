@@ -2,11 +2,13 @@
 
 FastAPI の依存関係はアップロードの本文を読んだ後に動くため、ASGI のミドルウェアで先に判定する。
 認証のない要求には、本文を読まずに 401 を返す（health などのパスも同じ）。
+例外は閲覧画面の HTML（GET /ui）だけで、データを含まない固定の中身を、本文を読まずに返す。
 """
 
 import asyncio
 import json
 
+from . import ui
 from .settings import Site, hash_client_key
 
 UPLOAD_PATH = "/api/v1/documents/extract"
@@ -28,6 +30,10 @@ class AuthMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
+            return
+        if scope["path"] == ui.UI_PATH and scope["method"] == "GET":
+            await send({"type": "http.response.start", "status": 200, "headers": ui.HEADERS})
+            await send({"type": "http.response.body", "body": ui.BODY})
             return
         key = _header(scope, b"x-api-key")
         site = self.site_by_hash.get(hash_client_key(key)) if key else None

@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>読み取りの記録</title>
+<style>
+:root { --fg: #1f2328; --muted: #656d76; --line: #d0d7de; --bg: #fff; --soft: #f6f8fa;
+  --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e; --link: #0969da; }
+@media (prefers-color-scheme: dark) {
+  :root { --fg: #e6edf3; --muted: #8d96a0; --line: #30363d; --bg: #0d1117; --soft: #161b22;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --link: #4493f8; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px; font: 14px/1.5 system-ui, sans-serif; color: var(--fg);
+  background: var(--bg); }
+main { max-width: 1200px; margin: 0 auto; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 15px; margin: 24px 0 8px; }
+header { display: flex; gap: 12px; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; }
+button, input, select { font: inherit; color: inherit; background: var(--soft);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+button { cursor: pointer; }
+.muted { color: var(--muted); }
+.cards { display: flex; gap: 8px; flex-wrap: wrap; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; min-width: 110px; }
+.card b { display: block; font-size: 20px; }
+.filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin-bottom: 8px; }
+.filters label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+  vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: normal; white-space: nowrap; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+#jobs tbody tr { cursor: pointer; }
+#jobs tbody tr:hover { background: var(--soft); }
+.name { word-break: break-all; }
+.s-succeeded { color: var(--ok); } .s-needs_review { color: var(--warn); }
+.s-failed { color: var(--bad); }
+td[class^="s-"] { white-space: nowrap; }
+pre { background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+  overflow: auto; max-height: 480px; white-space: pre-wrap; word-break: break-all; margin: 0; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; }
+dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
+dialog { width: min(1000px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+  color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+dialog::backdrop { background: rgb(0 0 0 / 40%); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.head { justify-content: space-between; }
+.head h2 { margin: 0; }
+#viewer { margin-top: 8px; }
+#viewer img { max-width: 100%; border: 1px solid var(--line); }
+#viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); }
+.error { color: var(--bad); }
+#login { max-width: 420px; margin: 64px auto; }
+#login input { width: 100%; margin: 8px 0; }
+</style>
+</head>
+<body>
+<main>
+<section id="login" hidden>
+  <h1>読み取りの記録</h1>
+  <p class="muted">呼び出しに使っている API キーを入れる。見えるのは、そのキーの拠点の記録だけ。</p>
+  <form id="login-form">
+    <input id="key" type="password" autocomplete="off" required aria-label="API キー">
+    <button type="submit">開く</button>
+    <p id="login-error" class="error"></p>
+  </form>
+</section>
+
+<section id="app" hidden>
+  <header>
+    <h1>読み取りの記録 <span id="site" class="muted"></span></h1>
+    <button id="logout" type="button">キーを入れ直す</button>
+  </header>
+
+  <h2 id="month-title">今月</h2>
+  <div id="cards" class="cards"></div>
+  <p id="month-note" class="muted"></p>
+  <div class="scroll"><table id="tasks">
+    <thead><tr><th>タスク</th><th class="num">件数</th><th class="num">入力トークン</th>
+      <th class="num">出力トークン</th><th class="num">費用</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+
+  <h2>ジョブ</h2>
+  <form id="filters" class="filters">
+    <label>受付日（から）<input id="f-from" type="date"></label>
+    <label>受付日（まで）<input id="f-to" type="date"></label>
+    <label>状態<select id="f-status">
+      <option value="">すべて</option>
+      <option value="succeeded">成功</option>
+      <option value="needs_review">要確認</option>
+      <option value="failed">失敗</option>
+      <option value="processing">処理中</option>
+      <option value="queued">待ち</option>
+    </select></label>
+    <label>タスク<select id="f-task"><option value="">すべて</option></select></label>
+    <button type="submit">絞り込む</button>
+  </form>
+  <div class="scroll"><table id="jobs">
+    <thead><tr><th>受付</th><th>ファイル名</th><th>タスク</th><th>状態</th>
+      <th class="num">費用</th><th>理由</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <p id="jobs-empty" class="muted" hidden>該当するジョブはない。</p>
+  <p class="row"><button id="more" type="button" hidden>次の50件</button>
+    <span id="jobs-error" class="error"></span></p>
+</section>
+
+<dialog id="detail">
+  <div class="row head">
+    <h2 id="d-title"></h2>
+    <button id="d-close" type="button">閉じる</button>
+  </div>
+  <h2>概要</h2>
+  <dl id="d-info"></dl>
+  <div id="d-error-box" hidden><h2>失敗の理由</h2><dl id="d-error"></dl></div>
+  <div id="d-issues-box" hidden>
+    <h2>指摘</h2>
+    <div class="scroll"><table id="d-issues">
+      <thead><tr><th>項目</th><th>読み取った文字</th><th>内容</th></tr></thead><tbody></tbody>
+    </table></div>
+  </div>
+  <h2>抜き出した結果（data）</h2>
+  <pre id="d-data"></pre>
+  <h2>記録</h2>
+  <div class="row">
+    <button id="d-show-file" type="button">元のファイルを表示</button>
+    <button id="d-download" type="button">元のファイルをダウンロード</button>
+    <button id="d-response" type="button">Claude の生の応答</button>
+    <button id="d-process" type="button">処理の写し</button>
+    <span id="d-message" class="error"></span>
+  </div>
+  <div id="viewer"></div>
+</dialog>
+</main>
+<script>
+"use strict";
+const KEY_STORE = "document-extraction-api.key";
+const PAGE = 50;
+const JST = 9 * 3600 * 1000;
+const STATUS = { queued: "待ち", processing: "処理中", succeeded: "成功",
+  needs_review: "要確認", failed: "失敗" };
+const $ = (id) => document.getElementById(id);
+let key = null;
+let filters = {};
+let nextBefore = null;
+let current = null;
+let blobUrl = null;
+
+function loadKey() { try { return sessionStorage.getItem(KEY_STORE); } catch { return null; } }
+function saveKey(value) {
+  try { value ? sessionStorage.setItem(KEY_STORE, value) : sessionStorage.removeItem(KEY_STORE); }
+  catch { /* 保存できなくても、このページを開いている間は使える */ }
+}
+
+class Unauthorized extends Error {}
+
+async function call(path, params) {
+  const url = new URL(path, location.origin);
+  for (const [name, value] of Object.entries(params || {})) {
+    if (value !== null && value !== undefined && value !== "") url.searchParams.set(name, value);
+  }
+  const response = await fetch(url, { headers: { "X-API-Key": key }, cache: "no-store" });
+  if (response.status === 401) throw new Unauthorized();
+  if (!response.ok) {
+    let message = `${response.status}`;
+    try { message = (await response.json()).error.message; } catch { /* 本文がない */ }
+    throw new Error(message);
+  }
+  return response;
+}
+const json = async (path, params) => (await call(path, params)).json();
+
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  if (className) node.className = className;
+  return node;
+}
+
+// 日付は日本時間で区切り、日本時間で表示する
+function jstToday() {
+  const t = new Date(Date.now() + JST);
+  return { y: t.getUTCFullYear(), m: t.getUTCMonth(), d: t.getUTCDate() };
+}
+function jstMidnight(y, m, d) { return new Date(Date.UTC(y, m, d) - JST).toISOString(); }
+function dayStart(value, offset) {
+  if (!value) return null;
+  const [y, m, d] = value.split("-").map(Number);
+  return jstMidnight(y, m - 1, d + offset);
+}
+function when(iso) {
+  return iso ? new Date(iso).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) : "—";
+}
+function usd(value) {
+  if (value === null || value === undefined) return "—";
+  return "$" + value.toFixed(value >= 1 ? 2 : 4);
+}
+const count = (value) => value === null || value === undefined ? "—" : value.toLocaleString("ja-JP");
+
+function showLogin(message) {
+  key = null;
+  saveKey(null);
+  $("app").hidden = true;
+  $("login").hidden = false;
+  $("login-error").textContent = message || "";
+  $("key").value = "";
+  $("key").focus();
+}
+
+function handle(error, target) {
+  if (error instanceof Unauthorized) { showLogin("キーが正しくない。入れ直す。"); return; }
+  target.textContent = "読み込めなかった: " + error.message;
+}
+
+async function start() {
+  const today = jstToday();
+  const [month, all] = await Promise.all([
+    json("/api/v1/summary", { from: jstMidnight(today.y, today.m, 1),
+      to: jstMidnight(today.y, today.m + 1, 1) }),
+    json("/api/v1/summary"),
+  ]);
+  $("login").hidden = true;
+  $("app").hidden = false;
+  $("site").textContent = `拠点: ${month.site}`;
+  $("month-title").textContent = `今月（${today.y}年${today.m + 1}月、日本時間）`;
+  renderSummary(month);
+  const select = $("f-task");
+  select.replaceChildren(new Option("すべて", ""));
+  for (const task of all.tasks) select.add(new Option(task.task_id, task.task_id));
+  // キーを入れ直したら、前の拠点の絞り込みは残さない
+  $("filters").reset();
+  filters = {};
+  await loadJobs(true);
+}
+
+function renderSummary(summary) {
+  const cards = $("cards");
+  cards.replaceChildren();
+  const card = (label, value, className) => {
+    const box = el("div", null, "card");
+    box.append(el("span", label, "muted"), el("b", value, className));
+    cards.append(box);
+  };
+  card("件数", count(summary.jobs));
+  for (const status of ["succeeded", "needs_review", "failed", "processing", "queued"]) {
+    card(STATUS[status], count(summary.status_counts[status]), `s-${status}`);
+  }
+  card("費用", usd(summary.cost_usd));
+  $("month-note").textContent =
+    `トークン: 入力 ${count(summary.input_tokens)}・出力 ${count(summary.output_tokens)}` +
+    (summary.unpriced_jobs ? `。単価の設定がなく費用の出ないジョブが ${summary.unpriced_jobs} 件ある` : "");
+  const body = $("tasks").tBodies[0];
+  body.replaceChildren();
+  for (const task of summary.tasks) {
+    const row = body.insertRow();
+    row.append(el("td", task.task_id), el("td", count(task.jobs), "num"),
+      el("td", count(task.input_tokens), "num"), el("td", count(task.output_tokens), "num"),
+      el("td", usd(task.cost_usd), "num"));
+  }
+}
+
+async function loadJobs(reset) {
+  const body = $("jobs").tBodies[0];
+  $("jobs-error").textContent = "";
+  if (reset) { body.replaceChildren(); nextBefore = null; }
+  let result;
+  try {
+    result = await json("/api/v1/jobs", { ...filters, before: nextBefore, limit: PAGE });
+  } catch (error) { handle(error, $("jobs-error")); return; }
+  for (const job of result.jobs) {
+    const row = body.insertRow();
+    const reason = job.status === "failed" ? job.error_code
+      : job.issue_count ? `指摘 ${job.issue_count} 件` : "";
+    row.append(el("td", when(job.created_at)), el("td", job.file_name ?? "（名前なし）", "name"),
+      el("td", job.task_id), el("td", STATUS[job.status] ?? job.status, `s-${job.status}`),
+      el("td", usd(job.cost_usd), "num"), el("td", reason));
+    row.tabIndex = 0;
+    row.addEventListener("click", () => openDetail(job.job_id));
+    row.addEventListener("keydown", (event) => { if (event.key === "Enter") openDetail(job.job_id); });
+  }
+  nextBefore = result.next_before;
+  $("more").hidden = !nextBefore;
+  $("jobs-empty").hidden = body.rows.length > 0;
+}
+
+function clearViewer() {
+  $("viewer").replaceChildren();
+  $("d-message").textContent = "";
+  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
+}
+
+async function openDetail(jobId) {
+  clearViewer();
+  let job;
+  try { job = await json(`/api/v1/jobs/${encodeURIComponent(jobId)}/detail`); }
+  catch (error) { handle(error, $("jobs-error")); return; }
+  current = job;
+  $("d-title").textContent = job.file_name ?? "（名前なし）";
+  const info = $("d-info");
+  info.replaceChildren();
+  const add = (list, label, value) => list.append(el("dt", label), el("dd", value ?? "—"));
+  add(info, "ジョブ ID", job.job_id);
+  add(info, "タスク", job.task_id);
+  add(info, "状態", STATUS[job.status] ?? job.status);
+  add(info, "受付", when(job.created_at));
+  add(info, "Claude へ送信", when(job.sent_at));
+  add(info, "完了", when(job.finished_at));
+  add(info, "試行回数", job.attempts);
+  add(info, "処理の版", job.versions.process);
+  add(info, "指定したモデル", job.requested_model);
+  add(info, "読んだモデル", job.versions.model);
+  add(info, "入力トークン", job.usage ? count(job.usage.input_tokens) : null);
+  add(info, "出力トークン", job.usage ? count(job.usage.output_tokens) : null);
+  add(info, "費用", job.usage ? usd(job.usage.cost_usd) : null);
+  add(info, "ファイルの SHA-256", job.file_sha256);
+
+  $("d-error-box").hidden = !job.error;
+  const errorList = $("d-error");
+  errorList.replaceChildren();
+  if (job.error) {
+    add(errorList, "コード", job.error.code);
+    add(errorList, "内容", job.error.message);
+  }
+  const issues = $("d-issues").tBodies[0];
+  issues.replaceChildren();
+  $("d-issues-box").hidden = !job.issues.length;
+  for (const issue of job.issues) {
+    const row = issues.insertRow();
+    row.append(el("td", issue.path), el("td", issue.raw ?? "—"), el("td", issue.message));
+  }
+  $("d-data").textContent = job.data === null ? "null" : JSON.stringify(job.data, null, 2);
+  if (!$("detail").open) $("detail").showModal();
+}
+
+async function fetchFile() {
+  const response = await call(`/api/v1/jobs/${encodeURIComponent(current.job_id)}/file`);
+  const blob = await response.blob();
+  if (blobUrl) URL.revokeObjectURL(blobUrl);
+  blobUrl = URL.createObjectURL(blob);
+  return blob.type;
+}
+
+async function showFile() {
+  clearViewer();
+  try {
+    const type = await fetchFile();
+    if (type === "application/pdf") {
+      const frame = el("iframe");
+      frame.src = blobUrl;
+      $("viewer").append(frame);
+    } else if (["image/png", "image/jpeg", "image/webp"].includes(type)) {
+      const image = el("img");
+      image.src = blobUrl;
+      image.alt = "送られたファイル";
+      $("viewer").append(image);
+    } else {
+      $("viewer").append(el("p", "この種類のファイルは画面に出せない。ダウンロードして開く。", "muted"));
+    }
+  } catch (error) { handle(error, $("d-message")); }
+}
+
+async function download() {
+  clearViewer();
+  try {
+    await fetchFile();
+    const link = el("a");
+    link.href = blobUrl;
+    link.download = current.file_name || current.job_id;
+    document.body.append(link);
+    link.click();
+    link.remove();
+  } catch (error) { handle(error, $("d-message")); }
+}
+
+async function showText(path, format) {
+  clearViewer();
+  try {
+    const result = await json(`/api/v1/jobs/${encodeURIComponent(current.job_id)}/${path}`);
+    $("viewer").append(...format(result));
+  } catch (error) { handle(error, $("d-message")); }
+}
+
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  key = $("key").value.trim();
+  try {
+    await start();
+    saveKey(key);
+  } catch (error) {
+    if (error instanceof Unauthorized) showLogin("キーが正しくない。");
+    else $("login-error").textContent = "読み込めなかった: " + error.message;
+  }
+});
+$("logout").addEventListener("click", () => showLogin());
+$("filters").addEventListener("submit", (event) => {
+  event.preventDefault();
+  filters = { from: dayStart($("f-from").value, 0), to: dayStart($("f-to").value, 1),
+    status: $("f-status").value, task_id: $("f-task").value };
+  loadJobs(true);
+});
+$("more").addEventListener("click", () => loadJobs(false));
+$("d-close").addEventListener("click", () => $("detail").close());
+$("detail").addEventListener("close", clearViewer);
+$("d-show-file").addEventListener("click", showFile);
+$("d-download").addEventListener("click", download);
+$("d-response").addEventListener("click", () => showText("response",
+  (raw) => [el("pre", JSON.stringify(raw, null, 2))]));
+$("d-process").addEventListener("click", () => showText("process", (snapshot) =>
+  Object.entries(snapshot.files).flatMap(([name, text]) =>
+    [el("h2", `${snapshot.name}/${name}`), el("pre", text)])));
+
+key = loadKey();
+if (key) start().catch((error) => error instanceof Unauthorized
+  ? showLogin("キーが正しくない。入れ直す。") : showLogin("読み込めなかった: " + error.message));
+else showLogin();
+</script>
+</body>
+</html>
