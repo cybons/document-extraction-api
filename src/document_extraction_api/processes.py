@@ -2,6 +2,7 @@
 
 各フォルダには prompt.md（Claude への指示文）と definition.py を置く。definition.py には
 TASK_ID、出力の形 Output（fields.Record の派生）、任意で check(data) -> list[Issue] を書く。
+閲覧画面に出す名前として、任意で NAME（帳票の名前）と、項目ごとの Field(title=...) を書ける。
 
 ジョブを受け付けたときに、処理の中身をジョブのフォルダへ写す（write_snapshot）。ワーカーは
 その写しで処理するので、受け付けた後に処理を直したり消したりしても、そのジョブは受け付けた
@@ -10,7 +11,9 @@ TASK_ID、出力の形 Output（fields.Record の派生）、任意で check(dat
 
 import copy
 import hashlib
+import re
 import types
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +44,10 @@ class Process:
     digest: str
     sources: dict[str, bytes]
     """読み込んだときの prompt.md と definition.py の中身。"""
+    display_name: str | None = None
+    """閲覧画面に出す帳票の名前（definition.py の NAME）。"""
+    labels: dict[str, str] | None = None
+    """閲覧画面に出す項目の名前（field_labels）。"""
 
     @property
     def version(self) -> str:
@@ -103,6 +110,9 @@ def load_process(site: str, task_dir: Path) -> Process:
         raise ProcessError(f"{definition_path} に TASK_ID がない")
     if not (isinstance(output, type) and issubclass(output, BaseModel)):
         raise ProcessError(f"{definition_path} に Output（fields.Record の派生）がない")
+    display_name = getattr(module, "NAME", None)
+    if display_name is not None and (not isinstance(display_name, str) or not display_name):
+        raise ProcessError(f"{definition_path} の NAME は空でない文字にする")
 
     digest = hashlib.sha256()
     for source in (sources[PROMPT_FILE], sources[DEFINITION_FILE], _FIELDS_SOURCE.read_bytes()):
@@ -117,7 +127,51 @@ def load_process(site: str, task_dir: Path) -> Process:
         schema=claude_schema(output),
         digest=digest.hexdigest()[:12],
         sources=sources,
+        display_name=display_name,
+        labels=field_labels(output),
     )
+
+
+def field_labels(output: type[BaseModel]) -> dict[str, str]:
+    """出力の形の項目に書いた名前（Field(title=...)）を、項目の道筋ごとに返す。
+
+    道筋は issues の path と同じ書き方で、リストの要素は番号の代わりに [] と書く
+    （例: {"items": "明細", "items[].quantity": "数量"}）。名前のない項目は入れない。
+    """
+    labels: dict[str, str] = {}
+
+    def walk(model: type[BaseModel], prefix: str, seen: frozenset) -> None:
+        if model in seen:
+            return
+        for name, info in model.model_fields.items():
+            path = f"{prefix}.{name}" if prefix else name
+            if info.title:
+                labels[path] = info.title
+            annotation = info.annotation
+            while typing.get_origin(annotation) is list:
+                annotation = typing.get_args(annotation)[0]
+                path += "[]"
+            if isinstance(annotation, type) and issubclass(annotation, fields.Record):
+                walk(annotation, path, seen | {model})
+
+    walk(output, "", frozenset())
+    return labels
+
+
+_PATH_PART = re.compile(r"\[(\d+)\]|([^.\[\]]+)")
+
+
+def describe_path(path: str, labels: dict[str, str]) -> str:
+    """指摘の path（items[1].quantity）を、項目の名前で読める言葉（明細 2行目の数量）にする。"""
+    pattern, words = "", ""
+    for index, name in _PATH_PART.findall(path):
+        if name:
+            pattern = f"{pattern}.{name}" if pattern else name
+            words += ("の" if words else "") + labels.get(pattern, name)
+        else:
+            pattern += "[]"
+            words += f" {int(index) + 1}行目"
+    return words or path
 
 
 def write_snapshot(process: Process, directory: Path) -> None:

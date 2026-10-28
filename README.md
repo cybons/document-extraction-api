@@ -20,12 +20,13 @@ uv run python -m document_extraction_api serve settings.toml
 - Python は 3.14 に固定。
 - 設定の項目は [settings.example.toml](settings.example.toml) と [settings.py](src/document_extraction_api/settings.py) を見る。
 - 拠点ごとに `claude_api_key` が要る。全拠点で同じキーを書いてもよい。
+- 拠点の `name` は閲覧画面に出す名前（省略すると設定のキー名を出す）。
 - 起動の失敗（設定の誤り、ポート使用中、多重起動）は `log_file` に残る。
 - API キー・ファイル名・帳票の本文はログに出さない。
 
 ## API
 
-すべての要求に `X-API-Key` が要る。health も同じ。キーで拠点が決まり、ほかの拠点のジョブは見えない。
+すべての要求に `X-API-Key` が要る。health も同じ（例外は閲覧画面の HTML の `GET /ui` だけ）。キーで拠点が決まり、ほかの拠点のジョブは見えない。
 
 ### 受付
 
@@ -104,6 +105,29 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 - 結果は、記録して返せる値にそろえてから記録する。UTF-8 にできない文字、有限でない数、32段を超える入れ子は `null` にし、その箇所を `issues` に入れて要確認にする。そろえる途中で想定外に止まっても、`data` を `null` にして要確認で終える。
 - 設定の単価（`[prices.<モデル>]`）は0以上の有限の数にする。そうでなければ起動しない。
 
+### 閲覧（見るだけ）
+
+ブラウザで `http://<サーバー>:8001/ui` を開き、呼び出しに使っているキーを入れる。見えるのはそのキーの拠点のジョブだけで、直す・消すなどの操作はない。
+
+- ダッシュボード：期間（今月・先月・今日・過去7日間・指定）と帳票で絞り、対応が必要な件数（失敗＋要確認）、読み取り件数、成功率（前の期間との比較）、費用（ドル）を上に並べる。その下に日ごとの件数のグラフ、帳票ごとの内訳、読み取りの一覧（対応が必要・すべて・成功）。日の区切りは日本時間。費用には、失敗したジョブで使ったトークンの分も入る。
+- 詳細：元のファイル（PDF・画像の表示とダウンロード）と、読み取った内容を項目名付きの表で並べる。確認が必要な項目には印と理由が付く。下に受付・送信・完了の時刻、試行回数、モデル、使用量。ジョブ ID・版・Claude の生の応答・受け付けたときの処理の写しは「技術者向けの情報」に畳んである。
+- 帳票名と項目名は、処理の定義の `NAME` と `Field(title=...)` から出す（[処理を足す・直す](#処理を足す直す)）。一覧と詳細は受け付けたときの処理の写しから読むので、処理を直しても過去のジョブの表示は変わらない。ダッシュボードの集計と帳票の選択肢は今の処理から読む。写しから名前が取れないとき（受け付けたときの定義に `NAME` がなかった、写しを読めない）は今の処理の名前を出し、それもなければタスクIDを出す。そのため、`NAME` を後から足すと、過去のジョブにもその名前が出る。
+- `/ui` の HTML はデータを含まない固定のページで、キーなしで返す。データはすべて下の API からキーを付けて取る。キーはそのタブの `sessionStorage` に置き、タブを閉じると消える。
+- 送られたファイル名は DB に残して画面に出す（フォルダの部分は落とし、255文字まで）。同じ内容のファイルを送り直して既存のジョブが返るときは、最初のファイル名のまま。ログにはファイル名を出さない。
+
+画面が使う API。拠点はキーで決まり、パラメータでは指定できない。ほかの拠点のジョブは 404。
+
+| API | 返すもの |
+|---|---|
+| `GET /api/v1/summary?from=&to=&task_id=&utc_offset=` | 拠点の表示名（`site_name`）、状態ごとの件数、トークンと費用の合計、費用の出ないジョブ（単価の設定がないモデル）の件数、タスクごとの内訳（`task_name` 付き）、日ごとの件数と費用（`days`）。日は `utc_offset`（例 `+09:00`、既定 `+00:00`）の時差で区切る |
+| `GET /api/v1/jobs?from=&to=&status=&task_id=&limit=&before=` | ジョブの一覧（新しい順）。`status` は繰り返して複数指定できる。`limit` は 1〜200（既定 50）。続きは、応答の `next_before` を `before` に入れて取る |
+| `GET /api/v1/jobs/<job_id>/detail` | 結果の取得と同じ内容に、帳票名（`task_name`）、項目名（`labels`）、指摘の項目を言葉にしたもの（`issue_fields`）、ファイル名・ハッシュ・指定したモデル・試行回数・受付/送信/完了の時刻を足したもの |
+| `GET /api/v1/jobs/<job_id>/file` | 送られた元のファイル |
+| `GET /api/v1/jobs/<job_id>/response` | Claude の生の応答（まだなければ 404 `response_not_found`） |
+| `GET /api/v1/jobs/<job_id>/process` | 受け付けたときの処理の写し（`prompt.md`・`definition.py` の中身） |
+
+- `from`・`to` は受付時刻で絞る。時差の付いた ISO 8601（`2026-10-01T00:00:00+09:00`）で書き、`from` 以上 `to` 未満。
+
 ## 処理を足す・直す
 
 `processes/<拠点>/<フォルダ名>/` に2つのファイルを置き、サービスを再起動する。基盤のコードは変えない。
@@ -112,19 +136,22 @@ curl -H "X-API-Key: <キー>" http://127.0.0.1:8001/api/v1/jobs/<job_id>
 - `definition.py`: タスクIDと出力の形。
 
 ```python
+from pydantic import Field
+
 from document_extraction_api.fields import Date, Issue, Number, Record, Text
 
 TASK_ID = "delivery.extract"   # 呼び出し側が送るタスクID。拠点によらず同じにする
+NAME = "納品書"                 # 任意。閲覧画面に出す帳票名
 
 
 class Item(Record):
-    product_name: Text
-    quantity: Number
+    product_name: Text = Field(title="品名")   # title は任意。閲覧画面に出す項目名
+    quantity: Number = Field(title="数量")
 
 
 class Output(Record):          # 出力の形
-    issue_date: Date
-    items: list[Item]
+    issue_date: Date = Field(title="発行日")
+    items: list[Item] = Field(title="明細")
 
 
 def check(data: Output) -> list[Issue]:   # 任意。指摘があれば要確認になる
@@ -135,6 +162,7 @@ def check(data: Output) -> list[Issue]:   # 任意。指摘があれば要確認
 - 項目の型は `Text`・`Number`・`Date` を使う。Claude には、どの項目も「書かれている文字」か `null` で書かせ、数値・日付への変換は基盤が行う（[fields.py](src/document_extraction_api/fields.py)）。
   - `Number` は桁区切りのカンマと全角数字を受け付ける。
   - `Date` は西暦（`2026-10-27`、`2026/10/27`、`2026年10月27日`）と令和・平成を受け付ける。`check` には `value`（`datetime.date` か `None`）と `raw` を持つ値で渡る。
+- `NAME` と `Field(title=...)` は表示のためだけに使い、Claude へ送る出力の形には入らない。
 - 受け付けたジョブは、受け付けたときの処理で読む。処理を直したり消したりしても、待ちのジョブには効かない。
 - 拠点に処理のないタスクは、その拠点では使えない。共通の処理への切り替えはしない。
 - `processes/` にある請求書・納品書の処理は仮の中身。項目とプロンプトは運用前に調整する。

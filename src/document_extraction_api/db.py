@@ -1,6 +1,7 @@
 """ジョブの記録（SQLite）。呼び出しはすべて同期で、非同期側からはスレッドで呼ぶ。"""
 
 import json
+import math
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     site TEXT NOT NULL,
     task_id TEXT NOT NULL,
     status TEXT NOT NULL,
+    file_name TEXT,
     file_sha256 TEXT NOT NULL,
     process_version TEXT NOT NULL,
     requested_model TEXT NOT NULL,
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status, created_at);
 CREATE INDEX IF NOT EXISTS jobs_dedup ON jobs (site, task_id, file_sha256);
+CREATE INDEX IF NOT EXISTS jobs_site ON jobs (site, created_at);
 """
 
 
@@ -49,6 +52,7 @@ class Job:
     site: str
     task_id: str
     status: str
+    file_name: str | None
     file_sha256: str
     process_version: str
     requested_model: str
@@ -67,7 +71,8 @@ class Job:
 
 
 def now() -> str:
-    return datetime.now(UTC).isoformat()
+    # 閲覧の期間の絞り込みで文字列のまま比べるので、桁をそろえる
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 class JobStore:
@@ -91,6 +96,7 @@ class JobStore:
         job_id: str,
         site: str,
         task_id: str,
+        file_name: str | None,
         file_sha256: str,
         process_version: str,
         requested_model: str,
@@ -99,6 +105,7 @@ class JobStore:
         """同じ拠点・タスク・ファイル・処理の版・モデルのジョブ（失敗以外）があればそれを返す。
 
         なければ place_file() でファイルを置いてからジョブを登録する。戻り値の bool は新規かどうか。
+        既存のジョブを返すときは、ファイル名は最初に送られたときのまま。
         """
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -115,13 +122,15 @@ class JobStore:
                 place_file()
                 stamp = now()
                 conn.execute(
-                    "INSERT INTO jobs (id, site, task_id, status, file_sha256, process_version,"
-                    " requested_model, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO jobs (id, site, task_id, status, file_name, file_sha256,"
+                    " process_version, requested_model, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         job_id,
                         site,
                         task_id,
                         QUEUED,
+                        file_name,
                         file_sha256,
                         process_version,
                         requested_model,
@@ -141,6 +150,100 @@ class JobStore:
         with closing(self.connect()) as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return _job(row) if row else None
+
+    def list_jobs(
+        self,
+        site: str,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        statuses: list[str] | None = None,
+        task_id: str | None = None,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[Job]:
+        """拠点のジョブを新しい順に返す。before はページ送りの手がかり（前のページの最後の id）。"""
+        where, params = _period(site, start, end, task_id)
+        if statuses:
+            where.append(f"status IN ({','.join('?' * len(statuses))})")
+            params.extend(statuses)
+        if before is not None:
+            where.append("id<?")
+            params.append(before)
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM jobs WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def summary(
+        self,
+        site: str,
+        *,
+        start: str | None = None,
+        end: str | None = None,
+        task_id: str | None = None,
+        utc_offset_minutes: int = 0,
+    ) -> dict:
+        """拠点のジョブの状態ごとの件数、トークンと費用の合計、タスクごとと日ごとの内訳。
+
+        日ごとの内訳は、受付時刻を utc_offset_minutes だけずらした日付で区切る。
+        """
+        where, params = _period(site, start, end, task_id)
+        condition = " AND ".join(where)
+        # トークン数は 0〜2**63-1 を記録するので、そのまま SUM すると SQLite の整数があふれる。
+        # 上下32ビットに分けて足し、Python で合わせる
+        tokens = ", ".join(
+            f"COALESCE(SUM({name} >> 32), 0) AS {name}_hi,"
+            f" COALESCE(SUM({name} & 4294967295), 0) AS {name}_lo"
+            for name in ("input_tokens", "output_tokens")
+        )
+        # トークンを使ったのに費用が出ていないジョブ（単価の設定がないモデル）も数える
+        totals = (
+            f"COUNT(*) AS jobs, {tokens}, COALESCE(SUM(cost_usd), 0) AS cost_usd,"
+            " SUM(input_tokens IS NOT NULL AND cost_usd IS NULL) AS unpriced_jobs"
+        )
+        with closing(self.connect()) as conn:
+            # 1回の集計の中で、件数と内訳が同じ時点の DB を見るように、読み取りを1つにまとめる
+            conn.execute("BEGIN")
+            total = conn.execute(f"SELECT {totals} FROM jobs WHERE {condition}", params).fetchone()
+            statuses = conn.execute(
+                f"SELECT status, COUNT(*) AS n FROM jobs WHERE {condition} GROUP BY status", params
+            ).fetchall()
+            tasks = conn.execute(
+                f"SELECT task_id, {totals} FROM jobs WHERE {condition}"
+                " GROUP BY task_id ORDER BY task_id",
+                params,
+            ).fetchall()
+            task_statuses = conn.execute(
+                f"SELECT task_id, status, COUNT(*) AS n FROM jobs WHERE {condition}"
+                " GROUP BY task_id, status",
+                params,
+            ).fetchall()
+            shift = f"{utc_offset_minutes:+d} minutes"
+            day_statuses = conn.execute(
+                f"SELECT date(created_at, ?) AS day, status, COUNT(*) AS n,"
+                f" COALESCE(SUM(cost_usd), 0) AS cost_usd FROM jobs WHERE {condition}"
+                " GROUP BY day, status ORDER BY day",
+                (shift, *params),
+            ).fetchall()
+            conn.execute("COMMIT")
+        return {
+            "status_counts": _status_counts(statuses),
+            **_totals(total),
+            "tasks": [
+                {
+                    "task_id": row["task_id"],
+                    **_totals(row),
+                    "status_counts": _status_counts(
+                        r for r in task_statuses if r["task_id"] == row["task_id"]
+                    ),
+                }
+                for row in tasks
+            ],
+            "days": _days(day_statuses),
+        }
 
     def claim_next(self) -> Job | None:
         """最も古い待ちのジョブを処理中にして返す。"""
@@ -216,12 +319,66 @@ class JobStore:
             conn.execute(f"UPDATE jobs SET {columns} WHERE id=?", (*values.values(), job_id))
 
 
+def _period(
+    site: str, start: str | None, end: str | None, task_id: str | None = None
+) -> tuple[list[str], list[Any]]:
+    where, params = ["site=?"], [site]
+    if task_id is not None:
+        where.append("task_id=?")
+        params.append(task_id)
+    if start is not None:
+        where.append("created_at>=?")
+        params.append(start)
+    if end is not None:
+        where.append("created_at<?")
+        params.append(end)
+    return where, params
+
+
+def _status_counts(rows) -> dict[str, int]:
+    counts = dict.fromkeys((QUEUED, PROCESSING, SUCCEEDED, NEEDS_REVIEW, FAILED), 0)
+    for row in rows:
+        counts[row["status"]] = row["n"]
+    return counts
+
+
+def _days(rows: list[sqlite3.Row]) -> list[dict]:
+    days: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        days.setdefault(row["day"], []).append(row)
+    return [
+        {
+            "date": day,
+            "jobs": sum(r["n"] for r in group),
+            "cost_usd": _finite(sum(r["cost_usd"] for r in group)),
+            "status_counts": _status_counts(group),
+        }
+        for day, group in days.items()
+    ]
+
+
+def _finite(cost: float) -> float | None:
+    """1件ずつは有限の費用でも、足すと無限になりうる。JSON で返せないので、出ないものとする。"""
+    return cost if math.isfinite(cost) else None
+
+
+def _totals(row: sqlite3.Row) -> dict:
+    return {
+        "jobs": row["jobs"],
+        "input_tokens": (row["input_tokens_hi"] << 32) + row["input_tokens_lo"],
+        "output_tokens": (row["output_tokens_hi"] << 32) + row["output_tokens_lo"],
+        "cost_usd": _finite(row["cost_usd"]),
+        "unpriced_jobs": row["unpriced_jobs"] or 0,
+    }
+
+
 def _job(row: sqlite3.Row) -> Job:
     return Job(
         id=row["id"],
         site=row["site"],
         task_id=row["task_id"],
         status=row["status"],
+        file_name=row["file_name"],
         file_sha256=row["file_sha256"],
         process_version=row["process_version"],
         requested_model=row["requested_model"],

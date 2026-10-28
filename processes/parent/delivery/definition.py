@@ -1,32 +1,35 @@
 """納品書（親会社）。仮の中身。項目とプロンプトは運用前に調整する。"""
 
+from pydantic import Field
+
 from document_extraction_api.fields import Date, Issue, Number, Record, Text
 
 TASK_ID = "delivery.extract"
+NAME = "納品書"
 
 
 class Item(Record):
-    product_code: Text
-    product_name: Text
-    quantity: Number
-    unit: Text
-    unit_price: Number
-    amount: Number
+    product_code: Text = Field(title="品番")
+    product_name: Text = Field(title="品名")
+    quantity: Number = Field(title="数量")
+    unit: Text = Field(title="単位")
+    unit_price: Number = Field(title="単価")
+    amount: Number = Field(title="金額")
 
 
 class OtherField(Record):
-    label: Text
-    value: Text
+    label: Text = Field(title="項目")
+    value: Text = Field(title="内容")
 
 
 class Output(Record):
-    document_number: Text
-    issue_date: Date
-    issuer_name: Text
-    recipient_name: Text
-    items: list[Item]
-    total_amount: Number
-    other_fields: list[OtherField]
+    document_number: Text = Field(title="伝票番号")
+    issue_date: Date = Field(title="発行日")
+    issuer_name: Text = Field(title="発行元")
+    recipient_name: Text = Field(title="宛先")
+    items: list[Item] = Field(title="明細")
+    total_amount: Number = Field(title="合計金額")
+    other_fields: list[OtherField] = Field(title="そのほかの記載")
 
 
 def check(data: Output) -> list[Issue]:

@@ -1,0 +1,1260 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>帳票読み取り</title>
+<style>
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --line: #e4e7ec;
+  --line-2: #d0d5dd;
+  --fg: #1d2433;
+  --fg-2: #5b6474;
+  --fg-3: #8a93a3;
+  --hover: #f0f2f5;
+  --track: #eceff3;
+  --ok: #1f9d6a;
+  --ok-soft: #e8f6ef;
+  --ok-line: #c3e6d4;
+  --warn: #e0a100;
+  --warn-ink: #8a6400;
+  --warn-soft: #fdf7e2;
+  --warn-line: #f1dd9c;
+  --bad: #d64545;
+  --bad-soft: #fdecec;
+  --bad-line: #f4c4c4;
+  --idle: #b4bcc8;
+  --focus: #3b6fd8;
+  --select: #dbe6fb;
+  --dark-btn: #1d2433;
+  --dark-btn-fg: #ffffff;
+  --code-key: #3f5fa8; --code-str: #1f7a50; --code-num: #b5530f; --code-lit: #8a3f8f;
+  --sans: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c; --card: #1c2027; --line: #2b313b; --line-2: #3a414d; --fg: #e8ebf0;
+    --fg-2: #a9b1be; --fg-3: #7f8896; --hover: #242a33; --track: #2b313b;
+    --ok: #4cc690; --ok-soft: #17302a; --ok-line: #24503f;
+    --warn: #eabb3c; --warn-ink: #f0c955; --warn-soft: #332b12; --warn-line: #574a1c;
+    --bad: #f07272; --bad-soft: #3a1f22; --bad-line: #643035; --idle: #5d6573;
+    --focus: #7ea3f0; --select: #2a3a5c; --dark-btn: #e8ebf0; --dark-btn-fg: #14171c;
+    --code-key: #9db4ec; --code-str: #8ed1a8; --code-num: #f0b07a; --code-lit: #d89ad9;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.6 var(--sans); }
+::selection { background: var(--select); color: var(--fg); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+[hidden] { display: none !important; }
+.num { font-variant-numeric: tabular-nums; }
+svg.i { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.75;
+  stroke-linecap: round; stroke-linejoin: round; flex: none; }
+button, input, select { font: inherit; color: inherit; }
+
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px;
+  border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); cursor: pointer;
+  white-space: nowrap; transition: background 150ms; }
+.btn:hover { background: var(--hover); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn.dark { background: var(--dark-btn); border-color: var(--dark-btn); color: var(--dark-btn-fg); }
+.btn.dark:hover { opacity: 0.88; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--fg-2); }
+.btn.ghost:hover { background: var(--hover); color: var(--fg); }
+
+/* 入口 */
+#login { min-height: 100dvh; display: grid; place-items: center; padding: 16px; }
+.login { width: min(420px, 100%); padding: 28px; }
+.login h1 { margin: 0 0 6px; }
+.login p { color: var(--fg-2); margin: 0 0 20px; }
+.login label { display: block; font-size: 13px; color: var(--fg-2); margin-bottom: 6px; }
+.login-row { display: flex; gap: 8px; }
+.login-row input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--line-2);
+  border-radius: 10px; background: var(--card); font-family: var(--mono); }
+.login-row .btn { height: 40px; }
+.login-error { color: var(--bad); min-height: 1.6em; margin-top: 10px; font-size: 13px; }
+
+/* 骨組み */
+.top { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 28px;
+  border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; z-index: 2; }
+.brand { font-weight: 700; font-size: 15px; white-space: nowrap; }
+.site { padding: 3px 12px; border: 1px solid var(--line-2); border-radius: 999px; font-size: 13px;
+  font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
+.top .sp { flex: 1; }
+main { max-width: 1180px; margin: 0 auto; padding: 32px 28px 64px; }
+h1 { font-weight: 700; font-size: 24px; margin: 0; letter-spacing: 0.01em; line-height: 1.35; }
+.head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.head .sp { flex: 1; }
+.filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.pill { position: relative; display: inline-flex; align-items: center; gap: 8px; height: 38px;
+  padding: 0 14px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card); cursor: pointer; }
+.pill:hover { background: var(--hover); }
+.pill:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pill > span { color: var(--fg-3); font-size: 13px; white-space: nowrap; }
+.pill select, .pill input { border: 0; background: transparent; font-weight: 600; padding: 0; cursor: pointer;
+  min-width: 0; }
+.pill select { appearance: none; padding-right: 22px; }
+.pill input { width: 8.6em; }
+.pill select:focus, .pill input:focus { outline: none; }
+.pill.select::after { content: ""; position: absolute; right: 14px; top: 50%; width: 7px; height: 7px;
+  border: solid var(--fg-2); border-width: 0 1.6px 1.6px 0; transform: translateY(-70%) rotate(45deg); pointer-events: none; }
+.range { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-3); }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+.grid { display: grid; gap: 14px; }
+.kpis { grid-template-columns: 1.2fr 1fr 1fr 1fr; margin-bottom: 14px; }
+.kpi { padding: 18px 20px 20px; min-height: 152px; display: flex; flex-direction: column; min-width: 0; }
+.kpi .label { color: var(--fg-2); font-size: 13.5px; display: flex; align-items: center; gap: 6px; }
+.kpi .value { font-size: 34px; font-weight: 650; line-height: 1.1; margin-top: auto; letter-spacing: -0.01em; }
+.kpi .value small { font-size: 15px; font-weight: 500; color: var(--fg-2); margin-left: 4px; letter-spacing: 0; }
+.kpi .sub { color: var(--fg-2); font-size: 13px; margin-top: 6px; }
+.kpi.attention { border-color: var(--line-2); }
+.kpi.attention .label { color: var(--fg); font-weight: 600; }
+.kpi.attention .value { color: var(--bad); }
+.kpi.attention .btn { margin-top: 12px; align-self: flex-start; height: 32px; }
+.kpi.fine { border-color: var(--line-2); }
+.kpi.fine .label { color: var(--ok); font-weight: 600; }
+.kpi.fine .value { color: var(--ok); font-size: 22px; line-height: 1.4; }
+.kpi.split { flex-direction: row; align-items: center; gap: 16px; }
+.kpi.split > div { display: flex; flex-direction: column; height: 100%; flex: 1; min-width: 0; }
+.legend { display: grid; gap: 2px; margin-top: 8px; font-size: 13px; }
+.legend > div { display: flex; align-items: center; gap: 8px; color: var(--fg-2); }
+.legend b { color: var(--fg); margin-left: auto; font-weight: 600; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+.c-succeeded { background: var(--ok); } .c-needs_review { background: var(--warn); }
+.c-failed { background: var(--bad); } .c-processing, .c-queued { background: var(--idle); }
+.donut { flex: none; width: 84px; height: 84px; }
+
+.row2 { grid-template-columns: 1.6fr 1fr; margin-bottom: 14px; }
+.row2.single { grid-template-columns: 1fr; }
+.card-h { display: flex; align-items: center; gap: 10px; padding: 16px 20px 0; flex-wrap: wrap; }
+.card-h h2 { font-size: 15px; margin: 0; font-weight: 650; }
+.card-h .sp { flex: 1; }
+.card-h .note { color: var(--fg-3); font-size: 12.5px; }
+.chart { padding: 10px 16px 6px; }
+.chart svg { width: 100%; height: 190px; display: block; overflow: visible; }
+.chart .ax { fill: var(--fg-3); font-size: 11px; font-family: var(--sans); }
+.chart .gl { stroke: var(--line); stroke-width: 1; }
+.chart g:hover rect { opacity: 0.8; }
+.chart-legend { display: flex; gap: 16px; padding: 0 20px 16px; font-size: 12.5px; color: var(--fg-2); }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.kinds { padding: 12px 20px 18px; display: grid; gap: 16px; align-content: start; }
+.kind-top { display: flex; align-items: baseline; gap: 8px; }
+.kind-top b { font-size: 15px; }
+.kind-top .n { color: var(--fg-2); font-size: 13px; }
+.kind-top .cost { margin-left: auto; font-size: 13px; color: var(--fg-2); }
+.stack { display: flex; height: 10px; border-radius: 999px; overflow: hidden; gap: 2px; margin: 6px 0 4px; background: var(--track); }
+.kind-foot { font-size: 12.5px; color: var(--fg-2); display: flex; gap: 14px; flex-wrap: wrap; }
+.t-bad { color: var(--bad); } .t-warn { color: var(--warn-ink); }
+.muted { color: var(--fg-3); }
+
+.list { overflow: hidden; }
+.seg { display: inline-flex; padding: 3px; background: var(--hover); border-radius: 10px; gap: 2px; }
+.seg button { border: 0; background: transparent; padding: 5px 12px; border-radius: 8px; color: var(--fg-2);
+  cursor: pointer; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.seg button:hover { color: var(--fg); }
+.seg button[aria-pressed="true"] { background: var(--card); color: var(--fg); font-weight: 600;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }
+.seg .c { font-size: 12px; padding: 0 7px; border-radius: 999px; background: var(--bad-soft); color: var(--bad); font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+.list table { margin-top: 12px; }
+th { text-align: left; font-weight: 500; font-size: 12.5px; color: var(--fg-3); padding: 8px 12px;
+  border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th:first-child, td:first-child { padding-left: 20px; } th:last-child, td:last-child { padding-right: 20px; }
+tbody tr:last-child td { border-bottom: 0; }
+.list tbody tr { cursor: pointer; }
+.list tbody tr:hover td { background: var(--hover); }
+.list tbody tr:focus-visible { outline-offset: -2px; }
+.r { text-align: right; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 8px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.badge svg.i { width: 14px; height: 14px; stroke-width: 2.2; }
+.b-succeeded { background: var(--ok-soft); color: var(--ok); }
+.b-needs_review { background: var(--warn-soft); color: var(--warn-ink); }
+.b-failed { background: var(--bad-soft); color: var(--bad); }
+.b-processing, .b-queued { background: var(--hover); color: var(--fg-2); }
+.when { color: var(--fg-2); white-space: nowrap; }
+.file { font-weight: 550; overflow-wrap: anywhere; }
+.what { color: var(--fg-2); }
+.list-foot { padding: 14px 20px; display: flex; justify-content: center; border-top: 1px solid var(--line); }
+.empty { padding: 36px 20px; text-align: center; color: var(--fg-2); }
+.empty strong { display: block; color: var(--fg); margin-bottom: 2px; }
+.skeleton td { padding: 16px 12px; }
+.skeleton td::before { content: ""; display: block; height: 10px; border-radius: 4px; background: var(--hover);
+  animation: pulse 1.2s ease-in-out infinite alternate; }
+@keyframes pulse { to { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .skeleton td::before { animation: none; } }
+.error-box { margin: 0 0 14px; padding: 12px 16px; border-radius: 12px; background: var(--bad-soft);
+  color: var(--bad); border: 1px solid var(--bad-line); }
+.list .error-box { margin: 14px 20px; }
+
+/* 詳細 */
+.back { margin: -8px 0 14px -10px; }
+.d-title { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.d-title h1 { overflow-wrap: anywhere; }
+.d-meta { color: var(--fg-2); margin: 4px 0 18px; display: flex; gap: 18px; flex-wrap: wrap; }
+.banner { display: flex; gap: 14px; padding: 16px 20px; border-radius: 14px; margin-bottom: 14px; border: 1px solid; }
+.banner > svg.i { width: 22px; height: 22px; margin-top: 2px; }
+.banner h2 { margin: 0; font-size: 17px; }
+.banner p { margin: 4px 0 0; color: var(--fg-2); }
+.banner ul { margin: 8px 0 0; padding-left: 1.2em; color: var(--fg); }
+.banner li b { font-weight: 600; }
+.banner .next { margin-top: 6px; color: var(--fg); }
+.banner.succeeded { background: var(--ok-soft); border-color: var(--ok-line); color: var(--ok); }
+.banner.needs_review { background: var(--warn-soft); border-color: var(--warn-line); color: var(--warn-ink); }
+.banner.failed { background: var(--bad-soft); border-color: var(--bad-line); color: var(--bad); }
+.banner.queued, .banner.processing { background: var(--hover); border-color: var(--line-2); color: var(--fg-2); }
+.cols { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); align-items: start; margin-bottom: 14px; }
+.doc { padding: 14px 20px 20px; }
+.viewer { background: var(--hover); border-radius: 10px; min-height: 280px; display: grid; place-items: center; overflow: hidden; }
+.viewer img { max-width: 100%; display: block; }
+.viewer iframe { width: 100%; height: 78vh; border: 0; display: block; background: #fff; }
+.viewer p { color: var(--fg-2); padding: 24px; text-align: center; margin: 0; }
+.values { padding-bottom: 8px; }
+.values > table { margin-top: 8px; }
+.values td { padding: 10px 20px; }
+.values .k { color: var(--fg-2); width: 34%; font-size: 13.5px; }
+.values .v { font-weight: 550; overflow-wrap: anywhere; }
+.raw { color: var(--fg-3); font-weight: 400; font-size: 12.5px; margin-left: 8px; }
+.none { color: var(--fg-3); font-weight: 400; }
+tr.flag > td { background: var(--warn-soft); }
+.msg { display: flex; align-items: center; gap: 6px; color: var(--warn-ink); font-size: 12.5px; font-weight: 500; margin-top: 2px; }
+.msg svg.i { width: 14px; height: 14px; }
+.sec-title { padding: 10px 20px 4px; font-weight: 650; font-size: 13.5px; color: var(--fg-2); }
+.lines { margin: 4px 20px 10px; border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+.lines th { background: var(--hover); padding: 7px 10px; font-size: 12px; }
+.lines td { padding: 8px 10px; font-size: 13px; font-weight: 400; }
+.lines th:first-child, .lines td:first-child { padding-left: 12px; }
+.lines td.flag { background: var(--warn-soft); color: var(--warn-ink); font-weight: 600; }
+.lines td.idx, .lines th.idx { color: var(--fg-3); width: 1%; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chips span { padding: 0 8px; border-radius: 6px; background: var(--hover); font-weight: 400; }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); padding: 18px 20px 6px; }
+.step { position: relative; padding-top: 20px; }
+.step::before { content: ""; position: absolute; top: 5px; left: 12px; right: 0; height: 2px; background: var(--line-2); }
+.step:last-child::before { display: none; }
+.step::after { content: ""; position: absolute; top: 0; left: 0; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--card); border: 2px solid var(--line-2); }
+.step.done::after { background: var(--fg); border-color: var(--fg); }
+.step .l { color: var(--fg-2); font-size: 12.5px; }
+.step .t { font-weight: 600; }
+.step .g { color: var(--fg-3); font-size: 12.5px; }
+.facts { display: grid; grid-template-columns: repeat(4, 1fr); padding: 12px 20px 20px; gap: 16px; margin: 0; }
+.facts dt { color: var(--fg-2); font-size: 12.5px; }
+.facts dd { margin: 2px 0 0; font-weight: 600; }
+details.card { margin-top: 14px; }
+details.card > summary { padding: 14px 20px; cursor: pointer; font-weight: 600; color: var(--fg-2); list-style: none;
+  display: flex; gap: 8px; align-items: center; }
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary svg.i { transition: transform 150ms; }
+details.card[open] > summary svg.i { transform: rotate(90deg); }
+.tech { padding: 0 20px 18px; display: grid; gap: 14px; font-size: 13px; }
+.tech dl { display: grid; grid-template-columns: 10em 1fr; gap: 4px 12px; margin: 0; }
+.tech dt { color: var(--fg-2); }
+.tech dd { margin: 0; font-family: var(--mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.tech .row { display: flex; gap: 8px; flex-wrap: wrap; }
+pre.code { margin: 0; padding: 12px 14px; font: 12.5px/1.6 var(--mono); overflow: auto; max-height: 520px;
+  white-space: pre-wrap; overflow-wrap: anywhere; background: var(--hover); border-radius: 10px; }
+.code-title { font-family: var(--mono); font-size: 12px; color: var(--fg-2); margin: 4px 0; }
+.j-key { color: var(--code-key); } .j-str { color: var(--code-str); } .j-num { color: var(--code-num); } .j-lit { color: var(--code-lit); }
+
+@media (max-width: 960px) {
+  .kpis { grid-template-columns: 1fr 1fr; }
+  .row2, .cols { grid-template-columns: 1fr; }
+  .facts { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 640px) {
+  main { padding: 20px 16px 48px; }
+  .top { padding: 0 12px 0 16px; gap: 8px; }
+  .top .btn .label { display: none; }
+  .top .btn { width: 36px; padding: 0; justify-content: center; }
+  h1 { font-size: 22px; }
+  .kpis { grid-template-columns: 1fr; }
+  .kpi { min-height: 0; }
+  .kpi .value { margin-top: 10px; }
+  .hide-sm { display: none; }
+  .values .k { width: 40%; }
+  .steps { grid-template-columns: 1fr; gap: 10px; }
+  .step::before { display: none; }
+  .tech dl { grid-template-columns: 1fr; }
+  /* 一覧は表をやめ、1件を2〜3行のまとまりにする */
+  .list thead { display: none; }
+  .list tbody tr:not(.skeleton) { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "file st" "task when" "what what"; gap: 4px 12px; padding: 12px 16px;
+    border-bottom: 1px solid var(--line); }
+  .list tbody tr:not(.skeleton):last-child { border-bottom: 0; }
+  .list tbody tr:not(.skeleton) td { padding: 0; border: 0; }
+  .list td.st { grid-area: st; justify-self: end; }
+  .list td.file { grid-area: file; }
+  .list td.task { grid-area: task; color: var(--fg-2); font-size: 13px; }
+  .list td.when { grid-area: when; justify-self: end; font-size: 13px; }
+  .list td.what { grid-area: what; font-size: 13px; }
+  .list td.what:empty { display: none; }
+}
+</style>
+</head>
+<body>
+<section id="login" hidden>
+  <form id="login-form" class="card login">
+    <h1>帳票読み取り</h1>
+    <p>呼び出しに使っている API キーで開きます。見えるのは、そのキーの記録だけです。</p>
+    <label for="key">API キー</label>
+    <div class="login-row">
+      <input id="key" type="password" autocomplete="off" spellcheck="false" required>
+      <button class="btn dark" type="submit">開く</button>
+    </div>
+    <div id="login-error" class="login-error" role="alert"></div>
+  </form>
+</section>
+
+<div id="app" hidden>
+  <header class="top">
+    <span class="brand">帳票読み取り</span>
+    <span id="site" class="site"></span>
+    <span class="sp"></span>
+    <button id="refresh" class="btn ghost" type="button" data-icon="refresh" aria-label="更新"><span class="label">更新</span></button>
+    <button id="logout" class="btn ghost" type="button" data-icon="key" aria-label="キーを入れ直す"><span class="label">キーを入れ直す</span></button>
+  </header>
+
+  <main id="dash">
+    <div class="head">
+      <h1 id="title"></h1>
+      <span class="sp"></span>
+      <div class="filters">
+        <label class="pill select"><span>期間</span>
+          <select id="period">
+            <option value="month">今月</option>
+            <option value="last_month">先月</option>
+            <option value="today">今日</option>
+            <option value="7days">過去7日間</option>
+            <option value="custom">期間を指定</option>
+          </select></label>
+        <span id="range" class="range" hidden>
+          <label class="pill"><input id="from" type="date" aria-label="この日から"></label>〜
+          <label class="pill"><input id="to" type="date" aria-label="この日まで"></label>
+        </span>
+        <label class="pill select"><span>帳票</span><select id="task"><option value="">すべて</option></select></label>
+      </div>
+    </div>
+    <div id="dash-error" class="error-box" role="alert" hidden></div>
+
+    <div class="grid kpis">
+      <section id="k-action" class="card kpi"></section>
+      <section class="card kpi">
+        <div class="label">読み取り件数</div>
+        <div class="value num"><span id="k-count"></span><small>件</small></div>
+        <div id="k-legend" class="legend"></div>
+      </section>
+      <section class="card kpi split">
+        <div>
+          <div class="label">成功率</div>
+          <div class="value num" id="k-rate"></div>
+          <div id="k-rate-sub" class="sub num"></div>
+        </div>
+        <svg id="donut" class="donut" viewBox="0 0 42 42" role="img"></svg>
+      </section>
+      <section class="card kpi">
+        <div class="label">費用</div>
+        <div id="k-cost" class="value num"></div>
+        <div id="k-cost-sub" class="sub num"></div>
+      </section>
+    </div>
+
+    <div id="row2" class="grid row2">
+      <section id="chart-card" class="card">
+        <div class="card-h"><h2>日ごとの読み取り件数</h2><span class="sp"></span><span class="note">日本時間</span></div>
+        <div class="chart"><svg id="chart" viewBox="0 0 700 190" preserveAspectRatio="none" role="img" aria-label="日ごとの読み取り件数"></svg></div>
+        <div class="chart-legend"><span><i class="dot c-succeeded"></i>成功</span><span><i class="dot c-needs_review"></i>確認が必要</span><span><i class="dot c-failed"></i>失敗</span></div>
+      </section>
+      <section class="card">
+        <div class="card-h"><h2>帳票ごと</h2></div>
+        <div id="kinds" class="kinds"></div>
+      </section>
+    </div>
+
+    <section id="list" class="card list">
+      <div class="card-h"><h2>読み取りの一覧</h2><span class="sp"></span>
+        <div class="seg" role="group" aria-label="表示する読み取り">
+          <button type="button" data-view="action" aria-pressed="true">対応が必要 <span id="seg-count" class="c"></span></button>
+          <button type="button" data-view="all" aria-pressed="false">すべて</button>
+          <button type="button" data-view="succeeded" aria-pressed="false">成功</button>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>状態</th><th>受付</th><th>帳票</th><th>ファイル名</th><th>内容</th><th class="r hide-sm">費用</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="rows-empty" class="empty" hidden></div>
+      <div id="rows-error" class="error-box" role="alert" hidden></div>
+      <div id="more-box" class="list-foot" hidden><button id="more" class="btn" type="button">さらに表示</button></div>
+    </section>
+  </main>
+
+  <main id="detail" hidden>
+    <button id="back" class="btn ghost back" type="button" data-icon="left">一覧に戻る</button>
+    <div id="detail-error" class="error-box" role="alert" hidden></div>
+    <div id="detail-loading" class="empty" hidden>読み込んでいます…</div>
+    <div id="detail-body" hidden>
+      <div class="d-title"><h1 id="d-name"></h1><span id="d-badge"></span></div>
+      <div id="d-meta" class="d-meta"></div>
+      <div id="d-banner" class="banner"></div>
+      <div class="grid cols">
+        <section class="card">
+          <div class="card-h"><h2>元のファイル</h2><span class="sp"></span>
+            <button id="download" class="btn" type="button" data-icon="download">ダウンロード</button></div>
+          <div class="doc"><div id="viewer" class="viewer"></div></div>
+        </section>
+        <section id="values" class="card values"></section>
+      </div>
+      <section class="card">
+        <div class="card-h"><h2>処理の記録</h2></div>
+        <div id="steps" class="steps"></div>
+        <dl id="facts" class="facts"></dl>
+      </section>
+      <details id="tech" class="card">
+        <summary><span data-icon="right"></span>技術者向けの情報（ジョブ ID・版・Claude の生の応答・処理の定義）</summary>
+        <div class="tech">
+          <dl id="tech-list"></dl>
+          <div class="row">
+            <button id="show-response" class="btn" type="button">Claude の生の応答を見る</button>
+            <button id="show-process" class="btn" type="button">処理の定義を見る</button>
+          </div>
+          <div id="tech-view"></div>
+        </div>
+      </details>
+    </div>
+  </main>
+</div>
+<script>
+"use strict";
+const KEY_STORE = "document-extraction-api.key";
+const PAGE = 50;
+const JST = 9 * 3600 * 1000;
+const DAY = 86400000;
+const NS = "http://www.w3.org/2000/svg";
+const STATUS = {
+  succeeded: { label: "成功", icon: "check" },
+  needs_review: { label: "確認が必要", icon: "alert" },
+  failed: { label: "失敗", icon: "x" },
+  processing: { label: "読み取り中", icon: "clock" },
+  queued: { label: "待ち", icon: "clock" },
+};
+const STATUS_ORDER = ["succeeded", "needs_review", "failed", "processing", "queued"];
+const STATUS_COLOR = { succeeded: "var(--ok)", needs_review: "var(--warn)", failed: "var(--bad)",
+  processing: "var(--idle)", queued: "var(--idle)" };
+const VIEWS = { action: ["failed", "needs_review"], all: [], succeeded: ["succeeded"] };
+// 失敗の理由を、オペレーター向けの言葉にする。「次にやること」は運用前に見直す
+const FAILURES = [
+  [/^unreadable_file$/, "ファイルを読めませんでした", "ファイルが壊れていないか、パスワードが掛かっていないかを確かめて、送り直してください。"],
+  [/^too_many_pages$/, "ページ数が上限を超えています", "帳票1件ずつに分けて送り直してください。"],
+  [/^too_large$/, "ファイルが大きすぎて読み取れませんでした", "解像度を下げるか、ページを分けて送り直してください。"],
+  [/^render_timeout$/, "ファイルの変換に時間がかかりすぎました", "時間をおいて送り直してください。続くときは管理者に連絡してください。"],
+  [/^claude_refused$/, "Claude が読み取りを断りました", "帳票の中身を確かめてください。続くときは管理者に連絡してください。"],
+  [/^(invalid_json|response_truncated)$/, "読み取った結果が壊れていました", "送り直してください。続くときは管理者に連絡してください。"],
+  [/^(claude_|job_timeout)/, "Claude から応答がありませんでした", "時間をおいて送り直してください。"],
+];
+const ICONS = {
+  left: "M15 18l-6-6 6-6", right: "M9 18l6-6-6-6", check: "M20 6L9 17l-5-5", x: "M18 6L6 18M6 6l12 12",
+  alert: "M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z",
+  clock: "M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+  key: "M15 7a2 2 0 012 2M21 9a6 6 0 01-7.7 5.7L11 17H9v2H7v2H3v-3.6l6.3-6.3A6 6 0 1121 9z",
+  refresh: "M21 12a9 9 0 01-15.4 6.4L3 16M3 12a9 9 0 0115.4-6.4L21 8M21 3v5h-5M3 21v-5h5",
+  download: "M12 3v12M7 10l5 5 5-5M5 21h14",
+};
+const $ = (id) => document.getElementById(id);
+
+let key = null;
+let view = "action";
+let nextBefore = null;
+let listToken = 0;
+// キーを入れ直したり条件を変えたりした後に、前の要求の応答で画面を上書きしないための番号
+let session = 0;
+let dashToken = 0;
+let techToken = 0;
+// 詳細を開く要求ごとの番号。詳細・元ファイル・技術情報の応答は、この番号が今のものだけを描く
+let detailGen = 0;
+let current = null;
+let blobUrl = null;
+// 項目名・タスクIDは任意の文字（constructor など）なので、Object ではなく Map で引く
+let taskNames = new Map();
+
+// ---------- 小さな道具 ----------
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  if (className) node.className = className;
+  return node;
+}
+function svgEl(tag, attrs) {
+  const node = document.createElementNS(NS, tag);
+  for (const [name, value] of Object.entries(attrs || {})) node.setAttribute(name, value);
+  return node;
+}
+function icon(name) {
+  const svg = svgEl("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", class: "i" });
+  svg.append(svgEl("path", { d: ICONS[name] }));
+  return svg;
+}
+for (const node of document.querySelectorAll("[data-icon]")) node.prepend(icon(node.dataset.icon));
+function badge(status) {
+  const info = STATUS[status] ?? { label: status, icon: "clock" };
+  const span = el("span", null, `badge b-${status}`);
+  span.append(icon(info.icon), document.createTextNode(info.label));
+  return span;
+}
+function showError(box, error) {
+  if (error instanceof Unauthorized) { showLogin("キーが正しくありません。入れ直してください。"); return; }
+  box.textContent = "読み込めませんでした：" + error.message;
+  box.hidden = false;
+}
+
+function loadKey() { try { return sessionStorage.getItem(KEY_STORE); } catch { return null; } }
+function saveKey(value) {
+  try { value ? sessionStorage.setItem(KEY_STORE, value) : sessionStorage.removeItem(KEY_STORE); }
+  catch { /* 保存できなくても、このページを開いている間は使える */ }
+}
+
+class Unauthorized extends Error {}
+async function call(path, params) {
+  const url = new URL(path, location.origin);
+  for (const [name, value] of Object.entries(params || {})) {
+    for (const item of [].concat(value)) {
+      if (item !== null && item !== undefined && item !== "") url.searchParams.append(name, item);
+    }
+  }
+  const response = await fetch(url, { headers: { "X-API-Key": key }, cache: "no-store" });
+  if (response.status === 401) throw new Unauthorized();
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try { message = (await response.json()).error.message; } catch { /* 本文がない */ }
+    throw new Error(message);
+  }
+  return response;
+}
+const json = async (path, params) => (await call(path, params)).json();
+const jobPath = (id, suffix) => `/api/v1/jobs/${encodeURIComponent(id)}${suffix ? "/" + suffix : ""}`;
+
+// 日付は日本時間で区切り、日本時間で表示する
+function jstToday() {
+  const t = new Date(Date.now() + JST);
+  return { y: t.getUTCFullYear(), m: t.getUTCMonth(), d: t.getUTCDate() };
+}
+const jstMidnight = (y, m, d) => new Date(Date.UTC(y, m, d) - JST);
+const isoDate = (date) => new Date(date.getTime() + JST).toISOString().slice(0, 10);
+function fromInput(value) {
+  const [y, m, d] = value.split("-").map(Number);
+  return jstMidnight(y, m - 1, d);
+}
+const fmt = (date, opts) => new Date(date).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", ...opts });
+const whenShort = (iso) => iso ? fmt(iso, { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+const whenTime = (iso) => iso ? fmt(iso, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+const monthDay = (date) => fmt(date, { month: "long", day: "numeric" });
+function usd(value, digits) {
+  if (value === null || value === undefined) return "—";
+  return "$" + value.toFixed(digits ?? (value >= 1 ? 2 : 3));
+}
+const count = (value) => value === null || value === undefined ? "—" : value.toLocaleString("ja-JP");
+function tokens(value) {
+  if (value >= 10000) return (value / 10000).toLocaleString("ja-JP", { maximumFractionDigits: 1 }) + "万";
+  return count(value);
+}
+function duration(from, to) {
+  if (!from || !to) return "";
+  const seconds = Math.max(0, Math.round((new Date(to) - new Date(from)) / 1000));
+  if (seconds < 60) return `${seconds}秒`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}分${seconds % 60}秒` : `${Math.floor(minutes / 60)}時間${minutes % 60}分`;
+}
+function modelName(model) {
+  const match = /^claude-([a-z]+)-(\d+)-(\d+)/.exec(model || "");
+  return match ? `Claude ${match[1][0].toUpperCase()}${match[1].slice(1)} ${match[2]}.${match[3]}` : (model || "—");
+}
+const taskLabel = (taskId, name) => name || taskNames.get(taskId) || taskId;
+function failure(code) {
+  for (const [pattern, title, next] of FAILURES) if (pattern.test(code || "")) return { title, next };
+  return { title: "読み取りに失敗しました", next: "管理者に連絡してください。" };
+}
+const finishedOf = (c) => c.succeeded + c.needs_review + c.failed;
+function rate(c) {
+  const finished = finishedOf(c);
+  return finished ? c.succeeded / finished * 100 : null;
+}
+const pct = (value) => value === null ? "—" : value.toLocaleString("ja-JP", { maximumFractionDigits: 1 });
+
+// ---------- 期間 ----------
+function period() {
+  const t = jstToday();
+  switch ($("period").value) {
+    case "last_month":
+      return { from: jstMidnight(t.y, t.m - 1, 1), to: jstMidnight(t.y, t.m, 1),
+        prev: [jstMidnight(t.y, t.m - 2, 1), jstMidnight(t.y, t.m - 1, 1)], prevLabel: "その前の月",
+        title: `${new Date(Date.UTC(t.y, t.m - 1, 1)).getUTCMonth() + 1}月の読み取り状況` };
+    case "today":
+      return { from: jstMidnight(t.y, t.m, t.d), to: jstMidnight(t.y, t.m, t.d + 1),
+        prev: [jstMidnight(t.y, t.m, t.d - 1), jstMidnight(t.y, t.m, t.d)], prevLabel: "前日",
+        title: "今日の読み取り状況" };
+    case "7days":
+      return { from: jstMidnight(t.y, t.m, t.d - 6), to: jstMidnight(t.y, t.m, t.d + 1),
+        prev: [jstMidnight(t.y, t.m, t.d - 13), jstMidnight(t.y, t.m, t.d - 6)], prevLabel: "その前の7日間",
+        title: "過去7日間の読み取り状況" };
+    case "custom": {
+      const from = $("from").value ? fromInput($("from").value) : jstMidnight(t.y, t.m, 1);
+      const last = $("to").value ? fromInput($("to").value) : jstMidnight(t.y, t.m, t.d);
+      const to = new Date(Math.max(last.getTime(), from.getTime()) + DAY);
+      return { from, to, prev: [new Date(from - (to - from)), from], prevLabel: "その前の同じ日数",
+        title: `${monthDay(from)}〜${monthDay(to - DAY)}の読み取り状況` };
+    }
+    default:
+      return { from: jstMidnight(t.y, t.m, 1), to: jstMidnight(t.y, t.m + 1, 1),
+        prev: [jstMidnight(t.y, t.m - 1, 1), jstMidnight(t.y, t.m, 1)], prevLabel: "先月",
+        title: `${t.m + 1}月の読み取り状況` };
+  }
+}
+const iso = (date) => date.toISOString();
+
+// ---------- 入口 ----------
+function showLogin(message) {
+  session++; listToken++; dashToken++; techToken++; detailGen++;
+  current = null;
+  key = null;
+  saveKey(null);
+  $("app").hidden = true;
+  $("login").hidden = false;
+  $("login-error").textContent = message || "";
+  $("key").value = "";
+  $("key").focus();
+}
+
+// 入れたキーで画面を開く。後から別のキーを入れ直していたら、成功も失敗も捨てて false を返す
+async function start() {
+  const mine = ++session;
+  let all;
+  try { all = await json("/api/v1/summary"); }
+  catch (error) { if (mine !== session) return false; throw error; }
+  if (mine !== session) return false;
+  $("login").hidden = true;
+  $("app").hidden = false;
+  $("site").textContent = all.site_name;
+  taskNames = new Map(all.tasks.map((task) => [task.task_id, task.task_name]));
+  const select = $("task");
+  select.replaceChildren(new Option("すべて", ""));
+  for (const task of all.tasks) select.add(new Option(taskLabel(task.task_id, task.task_name), task.task_id));
+  $("period").value = "month";
+  $("range").hidden = true;
+  view = "action";
+  for (const button of document.querySelectorAll(".seg button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === view));
+  }
+  route();
+  await loadDashboard();
+  return mine === session;
+}
+
+// ---------- ダッシュボード ----------
+async function loadDashboard() {
+  const p = period();
+  $("title").textContent = p.title;
+  $("dash-error").hidden = true;
+  const task = $("task").value;
+  const token = ++dashToken;
+  const list = loadJobs(true);
+  try {
+    const [summary, previous] = await Promise.all([
+      json("/api/v1/summary", { from: iso(p.from), to: iso(p.to), task_id: task, utc_offset: "+09:00" }),
+      json("/api/v1/summary", { from: iso(p.prev[0]), to: iso(p.prev[1]), task_id: task }),
+    ]);
+    if (token !== dashToken) return;
+    renderKpis(summary, previous, p);
+    renderChart(summary, p);
+    renderKinds(summary);
+  } catch (error) { if (token === dashToken) showError($("dash-error"), error); }
+  await list;
+}
+
+function renderKpis(summary, previous, p) {
+  const c = summary.status_counts;
+  const action = c.failed + c.needs_review;
+  const box = $("k-action");
+  box.replaceChildren();
+  if (action) {
+    box.className = "card kpi attention";
+    const label = el("div", "対応が必要", "label");
+    label.prepend(icon("alert"));
+    const value = el("div", count(action), "value num");
+    value.append(el("small", "件"));
+    const go = el("button", "確認する", "btn dark");
+    go.type = "button";
+    go.addEventListener("click", () => { setView("action"); $("list").scrollIntoView({ behavior: "smooth" }); });
+    box.append(label, value, el("div", `失敗 ${c.failed} 件 ・ 確認が必要 ${c.needs_review} 件`, "sub"), go);
+  } else {
+    box.className = "card kpi fine";
+    const label = el("div", "対応が必要なものはありません", "label");
+    label.prepend(icon("check"));
+    const waiting = c.queued + c.processing;
+    const text = !summary.jobs ? "この期間の読み取りはまだありません"
+      : waiting ? `${count(waiting)} 件を読み取り中です` : "すべて読み取れています";
+    box.append(label, el("div", text, "value"));
+  }
+
+  $("k-count").textContent = count(summary.jobs);
+  const legend = $("k-legend");
+  legend.replaceChildren();
+  for (const status of STATUS_ORDER) {
+    if (!c[status] && (status === "processing" || status === "queued")) continue;
+    const row = el("div");
+    row.append(el("span", null, `dot c-${status}`), document.createTextNode(STATUS[status].label),
+      el("b", count(c[status]), "num"));
+    legend.append(row);
+  }
+
+  const now = rate(c);
+  const before = rate(previous.status_counts);
+  const value = $("k-rate");
+  value.replaceChildren(document.createTextNode(pct(now)));
+  if (now !== null) value.append(el("small", "%"));
+  $("k-rate-sub").textContent = now === null ? "終わった読み取りがまだありません"
+    : `${p.prevLabel} ${before === null ? "—" : pct(before) + "%"}`;
+  const donut = $("donut");
+  donut.replaceChildren(svgEl("circle", { cx: 21, cy: 21, r: 16, fill: "none", stroke: "var(--track)", "stroke-width": 6 }));
+  const finished = finishedOf(c);
+  let offset = 25;
+  for (const status of ["succeeded", "needs_review", "failed"]) {
+    if (!finished || !c[status]) continue;
+    const share = c[status] / finished * 100;
+    donut.append(svgEl("circle", { cx: 21, cy: 21, r: 16, fill: "none", stroke: STATUS_COLOR[status],
+      "stroke-width": 6, pathLength: 100, "stroke-dasharray": `${share} ${100 - share}`, "stroke-dashoffset": offset }));
+    offset -= share;
+  }
+  donut.setAttribute("aria-label", `成功 ${c.succeeded}、確認が必要 ${c.needs_review}、失敗 ${c.failed}`);
+
+  $("k-cost").textContent = usd(summary.cost_usd, 2);
+  const charged = summary.jobs - c.queued - c.processing - summary.unpriced_jobs;
+  $("k-cost-sub").textContent = [
+    charged > 0 && summary.cost_usd ? `1件あたり ${usd(summary.cost_usd / charged, 3)}` : null,
+    `入力 ${tokens(summary.input_tokens)}・出力 ${tokens(summary.output_tokens)} トークン`,
+    summary.unpriced_jobs ? `単価の設定がないモデルの ${summary.unpriced_jobs} 件は含まない` : null,
+  ].filter(Boolean).join(" ・ ");
+  $("seg-count").textContent = action;
+  $("seg-count").hidden = !action;
+}
+
+function renderChart(summary, p) {
+  const days = Math.round((p.to - p.from) / DAY);
+  const show = days > 1 && days <= 62;
+  $("chart-card").hidden = !show;
+  $("row2").classList.toggle("single", !show);
+  if (!show) return;
+  const byDate = Object.fromEntries(summary.days.map((day) => [day.date, day]));
+  const svg = $("chart");
+  svg.replaceChildren();
+  const W = 700, H = 190, padTop = 10, padBottom = 22, left = 28;
+  const peak = Math.max(1, ...summary.days.map((day) => day.jobs));
+  const step = peak <= 5 ? 1 : peak <= 10 ? 2 : peak <= 50 ? 10 : Math.pow(10, Math.ceil(Math.log10(peak)) - 1) * 2;
+  const max = Math.ceil(peak / step) * step;
+  const scale = (n) => (H - padTop - padBottom) * n / max;
+  for (let v = 0; v <= max; v += step) {
+    const y = H - padBottom - scale(v);
+    svg.append(svgEl("line", { x1: left, x2: W, y1: y, y2: y, class: "gl" }));
+    const label = svgEl("text", { x: 0, y: y + 4, class: "ax" });
+    label.textContent = v;
+    svg.append(label);
+  }
+  const bw = (W - left) / days;
+  for (let i = 0; i < days; i++) {
+    const date = isoDate(new Date(p.from.getTime() + i * DAY));
+    const month = Number(date.slice(5, 7));
+    const dayOfMonth = Number(date.slice(8));
+    const x = left + i * bw + bw * 0.18;
+    if (days <= 8 || dayOfMonth === 1 || dayOfMonth % 5 === 0) {
+      const label = svgEl("text", { x, y: H - 6, class: "ax" });
+      label.textContent = days <= 8 ? `${month}/${dayOfMonth}` : `${dayOfMonth}日`;
+      svg.append(label);
+    }
+    const day = byDate[date];
+    if (!day) continue;
+    const c = day.status_counts;
+    const group = svgEl("g");
+    const tip = svgEl("title");
+    tip.textContent = `${month}月${dayOfMonth}日：${day.jobs}件（成功 ${c.succeeded}・確認が必要 ${c.needs_review}・失敗 ${c.failed}）`;
+    group.append(tip);
+    let y = H - padBottom;
+    for (const status of STATUS_ORDER) {
+      if (!c[status]) continue;
+      const h = scale(c[status]);
+      y -= h;
+      group.append(svgEl("rect", { x, y: y + 1, width: Math.max(2, bw * 0.64), height: Math.max(1, h - 1), rx: 2,
+        fill: STATUS_COLOR[status] }));
+    }
+    svg.append(group);
+  }
+}
+
+function renderKinds(summary) {
+  const box = $("kinds");
+  box.replaceChildren();
+  if (!summary.tasks.length) { box.append(el("div", "この期間の読み取りはありません。", "muted")); return; }
+  for (const task of [...summary.tasks].sort((a, b) => b.jobs - a.jobs)) {
+    const c = task.status_counts;
+    const item = el("div");
+    const top = el("div", null, "kind-top");
+    top.append(el("b", taskLabel(task.task_id, task.task_name)), el("span", `${count(task.jobs)} 件`, "n num"),
+      el("span", usd(task.cost_usd, 2), "cost num"));
+    const stack = el("div", null, "stack");
+    for (const status of STATUS_ORDER) {
+      if (!c[status]) continue;
+      const seg = el("span", null, `c-${status}`);
+      seg.style.flexGrow = c[status];
+      stack.append(seg);
+    }
+    const foot = el("div", null, "kind-foot");
+    const r = rate(c);
+    foot.append(el("span", r === null ? "成功率 —" : `成功率 ${pct(r)}%`, "num"));
+    if (c.needs_review) foot.append(el("span", `確認が必要 ${c.needs_review}`, "t-warn"));
+    if (c.failed) foot.append(el("span", `失敗 ${c.failed}`, "t-bad"));
+    item.append(top, stack, foot);
+    box.append(item);
+  }
+}
+
+function setView(name) {
+  view = name;
+  for (const button of document.querySelectorAll(".seg button")) {
+    button.setAttribute("aria-pressed", String(button.dataset.view === name));
+  }
+  loadJobs(true);
+}
+
+function summarize(job) {
+  if (job.status === "failed") return { text: failure(job.error_code).title, cls: "t-bad" };
+  if (job.status === "needs_review") {
+    const issues = job.issues || [];
+    if (issues.length === 1) {
+      const issue = issues[0];
+      return { text: issue.field ? `${issue.field}：${issue.message}` : issue.message, cls: "t-warn" };
+    }
+    const fields = [...new Set(issues.map((issue) => issue.field).filter(Boolean))];
+    const head = fields.slice(0, 2).join("・") + (fields.length > 2 ? " ほか" : "");
+    return { text: `${head || "確認が必要な項目"}（${issues.length} 件）`, cls: "t-warn" };
+  }
+  if (job.status === "queued" || job.status === "processing") return { text: "読み取りが終わるのを待っています", cls: "" };
+  return { text: "", cls: "" };
+}
+
+async function loadJobs(reset) {
+  const body = $("rows");
+  const token = ++listToken;
+  $("rows-error").hidden = true;
+  $("rows-empty").hidden = true;
+  if (reset) {
+    nextBefore = null;
+    body.replaceChildren(...Array.from({ length: 4 }, () => {
+      const tr = el("tr", null, "skeleton");
+      for (let i = 0; i < 6; i++) tr.append(el("td"));
+      return tr;
+    }));
+    $("more-box").hidden = true;
+  }
+  const p = period();
+  let result;
+  try {
+    result = await json("/api/v1/jobs", { from: iso(p.from), to: iso(p.to), task_id: $("task").value,
+      status: VIEWS[view], before: nextBefore, limit: PAGE });
+  } catch (error) {
+    if (token === listToken) { if (reset) body.replaceChildren(); showError($("rows-error"), error); }
+    return;
+  }
+  if (token !== listToken) return;  // 後から変えた条件の結果を優先する
+  if (reset) body.replaceChildren();
+  for (const job of result.jobs) body.append(jobRow(job));
+  nextBefore = result.next_before;
+  $("more-box").hidden = !nextBefore;
+  if (!body.children.length) {
+    const empty = $("rows-empty");
+    empty.replaceChildren();
+    if (view === "action") {
+      empty.append(el("strong", "対応が必要な読み取りはありません"),
+        document.createTextNode("この期間の読み取りは、問題なく終わっているか、まだ読み取り中です。"));
+    } else {
+      empty.append(el("strong", "この期間の読み取りはありません"),
+        document.createTextNode("期間や帳票を変えると出てくることがあります。"));
+    }
+    empty.hidden = false;
+  }
+}
+
+function jobRow(job) {
+  const tr = el("tr");
+  tr.tabIndex = 0;
+  const what = summarize(job);
+  const statusCell = el("td", null, "st");
+  statusCell.append(badge(job.status));
+  tr.append(statusCell, el("td", whenShort(job.created_at), "when num"),
+    el("td", taskLabel(job.task_id, job.task_name), "task"), el("td", job.file_name ?? "（名前なし）", "file"),
+    el("td", what.text, `what ${what.cls}`), el("td", usd(job.cost_usd), "r num hide-sm"));
+  const open = () => { location.hash = `job=${job.job_id}`; };
+  tr.addEventListener("click", open);
+  tr.addEventListener("keydown", (event) => { if (event.key === "Enter") open(); });
+  return tr;
+}
+
+// ---------- 詳細 ----------
+function route() {
+  const match = location.hash.match(/^#job=([\w-]+)$/);
+  $("dash").hidden = Boolean(match);
+  $("detail").hidden = !match;
+  if (match) openDetail(match[1]);
+  else { detailGen++; current = null; clearFile(); }
+}
+
+function clearFile() {
+  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
+  $("viewer").replaceChildren();
+}
+
+async function openDetail(jobId) {
+  window.scrollTo(0, 0);
+  $("detail-error").hidden = true;
+  $("detail-body").hidden = true;
+  $("detail-loading").hidden = false;
+  clearFile();
+  current = null;
+  const gen = ++detailGen;
+  const mine = session;
+  const live = () => gen === detailGen && mine === session && location.hash === `#job=${jobId}`;
+  let job;
+  try { job = await json(jobPath(jobId, "detail")); }
+  catch (error) {
+    if (!live()) return;
+    $("detail-loading").hidden = true; showError($("detail-error"), error); return;
+  }
+  if (!live()) return;
+  $("detail-loading").hidden = true;
+  current = job;
+  $("d-name").textContent = job.file_name ?? "（名前なし）";
+  $("d-badge").replaceChildren(badge(job.status));
+  const meta = $("d-meta");
+  meta.replaceChildren(el("span", taskLabel(job.task_id, job.task_name)),
+    el("span", `${whenShort(job.created_at)} 受付`, "num"));
+  if (job.sent_at && job.finished_at) meta.append(el("span", `読み取り ${duration(job.sent_at, job.finished_at)}`, "num"));
+  if (job.usage) meta.append(el("span", usd(job.usage.cost_usd), "num"));
+  renderBanner(job);
+  renderValues(job);
+  renderRecord(job);
+  $("tech").open = false;
+  $("tech-view").replaceChildren();
+  $("detail-body").hidden = false;
+  loadFile(job, live);
+}
+
+function renderBanner(job) {
+  const banner = $("d-banner");
+  banner.className = `banner ${job.status}`;
+  const text = el("div");
+  if (job.status === "succeeded") {
+    text.append(el("h2", "読み取れました"), el("p", "確認が必要な項目はありません。"));
+  } else if (job.status === "needs_review") {
+    text.append(el("h2", `確認が必要な項目が ${job.issues.length} つあります`),
+      el("p", "元のファイルと見比べて確かめてください。読み取った内容の、色の付いたところです。"));
+    const list = el("ul");
+    job.issues.forEach((issue, i) => {
+      const li = el("li");
+      const field = job.issue_fields[i];
+      if (field) li.append(el("b", field), document.createTextNode("："));
+      li.append(document.createTextNode(issue?.message ?? ""));
+      if (issue?.raw !== null && issue?.raw !== undefined) li.append(el("span", `帳票では「${issue.raw}」`, "raw"));
+      list.append(li);
+    });
+    text.append(list);
+  } else if (job.status === "failed") {
+    const f = failure(job.error?.code);
+    text.append(el("h2", `読み取れませんでした：${f.title}`), el("div", f.next, "next"));
+  } else {
+    text.append(el("h2", job.status === "queued" ? "読み取りの順番を待っています" : "読み取り中です"),
+      el("p", "終わるまで少し待ってから「更新」を押してください。"));
+  }
+  banner.replaceChildren(icon((STATUS[job.status] ?? STATUS.queued).icon), text);
+}
+
+// 読み取った内容。項目の名前は処理の定義（labels）から取り、なければ項目のキーを出す
+const isDatePair = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
+  && Object.keys(value).length === 2 && Object.hasOwn(value, "value") && Object.hasOwn(value, "raw");
+const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value) && !isDatePair(value);
+const labelOf = (pattern, name, ctx) => ctx.labels.get(pattern) ?? name;
+
+function renderValues(job) {
+  const box = $("values");
+  const head = el("div", null, "card-h");
+  head.append(el("h2", "読み取った内容"));
+  box.replaceChildren(head);
+  if (job.data === null || job.data === undefined) {
+    box.append(el("div", job.status === "failed" ? "読み取った内容はありません。" : "まだ読み取っていません。", "empty"));
+    return;
+  }
+  const issues = new Map();
+  for (const issue of job.issues) {
+    if (!issue || typeof issue.path !== "string") continue;
+    if (!issues.has(issue.path)) issues.set(issue.path, []);
+    issues.get(issue.path).push(issue);
+  }
+  const ctx = { labels: new Map(Object.entries(job.labels || {})), issues };
+  if (!isRecord(job.data)) {
+    box.append(codeBlock(JSON.stringify(job.data, null, 2)));
+    return;
+  }
+  renderRecordInto(box, job.data, "", "", ctx);
+}
+
+function renderRecordInto(box, record, path, pattern, ctx) {
+  let body = null;
+  for (const [name, value] of Object.entries(record)) {
+    const here = path ? `${path}.${name}` : name;
+    const herePattern = pattern ? `${pattern}.${name}` : name;
+    const label = labelOf(herePattern, name, ctx);
+    if (Array.isArray(value) && value.length && value.every(isRecord)) {
+      body = null;
+      box.append(el("div", `${label}（${value.length} 行）`, "sec-title"),
+        recordTable(value, here, `${herePattern}[]`, ctx));
+      continue;
+    }
+    if (!body) { const table = el("table"); box.append(table); body = table.createTBody(); }
+    const tr = body.insertRow();
+    const v = el("td", null, "v");
+    v.append(renderValue(value, here, herePattern, ctx));
+    const issues = ctx.issues.get(here);
+    if (issues) {
+      tr.className = "flag";
+      for (const issue of issues) {
+        const msg = el("div", null, "msg");
+        msg.append(icon("alert"), document.createTextNode(issue.message ?? ""));
+        v.append(msg);
+      }
+    }
+    tr.append(el("td", label, "k"), v);
+  }
+}
+
+function renderValue(value, path, pattern, ctx) {
+  const issues = ctx.issues.get(path) || [];
+  const raw = issues.find((issue) => issue.raw !== null && issue.raw !== undefined)?.raw;
+  const span = el("span");
+  if (value === null || value === undefined) {
+    span.append(el("span", issues.length ? "読み取れず" : "記載なし", "none"));
+    if (raw !== undefined) span.append(el("span", `帳票では「${raw}」`, "raw"));
+    return span;
+  }
+  if (isDatePair(value)) {
+    if (value.value === null) span.append(el("span", value.raw === null ? "記載なし" : "読み取れず", "none"));
+    else {
+      const [y, m, d] = String(value.value).split("-").map(Number);
+      span.append(el("span", y && m && d ? `${y}年${m}月${d}日` : value.value, "num"));
+    }
+    if (value.raw !== null && value.raw !== value.value) span.append(el("span", `帳票では「${value.raw}」`, "raw"));
+    return span;
+  }
+  if (Array.isArray(value)) {
+    if (!value.length) return el("span", "なし", "none");
+    const chips = el("span", null, "chips");
+    value.forEach((item, i) => {
+      const chip = el("span");
+      chip.append(renderValue(item, `${path}[${i}]`, `${pattern}[]`, ctx));
+      chips.append(chip);
+    });
+    return chips;
+  }
+  if (typeof value === "object") {
+    const inner = el("div");
+    renderRecordInto(inner, value, path, pattern, ctx);
+    return inner;
+  }
+  span.textContent = String(value);
+  if (raw !== undefined && raw !== String(value)) span.append(el("span", `帳票では「${raw}」`, "raw"));
+  return span;
+}
+
+function recordTable(rows, path, pattern, ctx) {
+  const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  const wrap = el("div", null, "lines");
+  const table = el("table");
+  const head = table.createTHead().insertRow();
+  head.append(el("th", "#", "idx"), ...columns.map((name) => el("th", labelOf(`${pattern}.${name}`, name, ctx))));
+  const body = table.createTBody();
+  rows.forEach((row, i) => {
+    const tr = body.insertRow();
+    tr.append(el("td", i + 1, "idx num"));
+    for (const name of columns) {
+      const here = `${path}[${i}].${name}`;
+      const td = el("td");
+      td.append(Object.hasOwn(row, name) ? renderValue(row[name], here, `${pattern}.${name}`, ctx) : el("span", "—", "none"));
+      const issues = ctx.issues.get(here);
+      if (issues) {
+        td.className = "flag";
+        td.title = issues.map((issue) => issue.message).join("\n");
+      }
+      tr.append(td);
+    }
+  });
+  wrap.append(table);
+  return wrap;
+}
+
+function renderRecord(job) {
+  const steps = $("steps");
+  steps.replaceChildren();
+  for (const [label, at, since, gapLabel] of [
+    ["受付", job.created_at, null, ""],
+    ["Claude へ送信", job.sent_at, job.created_at, "待ち"],
+    ["完了", job.finished_at, job.sent_at, "読み取り"],
+  ]) {
+    const step = el("div", null, "step" + (at ? " done" : ""));
+    step.append(el("div", label, "l"), el("div", at ? whenTime(at) : "—", "t num"));
+    const gap = duration(since, at);
+    if (gap) step.append(el("div", `${gapLabel} ${gap}`, "g"));
+    steps.append(step);
+  }
+  const facts = $("facts");
+  facts.replaceChildren();
+  const fact = (label, value) => {
+    const div = el("div");
+    div.append(el("dt", label), el("dd", value ?? "—", "num"));
+    facts.append(div);
+  };
+  fact("試行回数", `${job.attempts} 回`);
+  fact("読んだモデル", job.versions.model ? modelName(job.versions.model) : null);
+  fact("使ったトークン", job.usage ? `入力 ${count(job.usage.input_tokens)} / 出力 ${count(job.usage.output_tokens)}` : null);
+  fact("費用", job.usage ? usd(job.usage.cost_usd, 4) : null);
+
+  const list = $("tech-list");
+  list.replaceChildren();
+  const tech = (label, value) => list.append(el("dt", label), el("dd", value ?? "—"));
+  tech("ジョブ ID", job.job_id);
+  tech("タスク ID", job.task_id);
+  tech("処理の版", job.versions.process);
+  tech("指定したモデル", job.requested_model);
+  tech("読んだモデル", job.versions.model);
+  tech("ファイルの SHA-256", job.file_sha256);
+  if (job.error) tech("失敗のコード", job.error.code);
+  for (const issue of job.issues) tech("指摘", `${issue?.path}：${issue?.message}`);
+}
+
+function codeBlock(text) {
+  const pre = el("pre", null, "code");
+  const pattern = /("(?:\\.|[^\\"])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    pre.append(document.createTextNode(text.slice(last, match.index)));
+    const cls = match[1] ? (match[2] ? "j-key" : "j-str") : match[3] ? "j-lit" : "j-num";
+    pre.append(el("span", match[1] ?? match[0], cls));
+    if (match[2]) pre.append(document.createTextNode(match[2]));
+    last = match.index + match[0].length;
+  }
+  pre.append(document.createTextNode(text.slice(last)));
+  return pre;
+}
+
+async function showTech(load) {
+  const box = $("tech-view");
+  const token = ++techToken;
+  const gen = detailGen;
+  const live = () => token === techToken && gen === detailGen;
+  box.replaceChildren(el("div", "読み込み中…", "muted"));
+  try {
+    const nodes = await load();
+    if (live()) box.replaceChildren(...nodes);
+  } catch (error) {
+    if (!live()) return;
+    if (error instanceof Unauthorized) { showLogin("キーが正しくありません。入れ直してください。"); return; }
+    box.replaceChildren(el("div", "読み込めませんでした：" + error.message, "muted"));
+  }
+}
+
+async function loadFile(job, live) {
+  const viewer = $("viewer");
+  viewer.replaceChildren(el("p", "読み込み中…"));
+  try {
+    const blob = await (await call(jobPath(job.job_id, "file"))).blob();
+    if (!live()) return;
+    blobUrl = URL.createObjectURL(blob);
+    if (blob.type === "application/pdf") {
+      const frame = el("iframe");
+      frame.title = "送られたファイル";
+      frame.src = blobUrl;
+      viewer.replaceChildren(frame);
+    } else if (["image/png", "image/jpeg", "image/webp"].includes(blob.type)) {
+      const image = el("img");
+      image.src = blobUrl;
+      image.alt = "送られたファイル";
+      viewer.replaceChildren(image);
+    } else {
+      viewer.replaceChildren(el("p", "この種類のファイル（TIFF など）はブラウザで表示できません。ダウンロードして開いてください。"));
+    }
+  } catch (error) {
+    if (!live()) return;
+    if (error instanceof Unauthorized) { showLogin("キーが正しくありません。入れ直してください。"); return; }
+    viewer.replaceChildren(el("p", "元のファイルを読み込めませんでした：" + error.message));
+  }
+}
+
+// ---------- 操作 ----------
+$("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const entered = $("key").value.trim();
+  key = entered;
+  try {
+    if (await start()) saveKey(entered);
+  } catch (error) {
+    if (error instanceof Unauthorized) showLogin("キーが正しくありません。");
+    else $("login-error").textContent = "読み込めませんでした：" + error.message;
+  }
+});
+$("logout").addEventListener("click", () => { history.replaceState(null, "", location.pathname); showLogin(); });
+// 詳細では、表示中のジョブではなく URL のジョブを開き直す（別のジョブへ移った直後に押しても取り違えない）
+$("refresh").addEventListener("click", () => location.hash.startsWith("#job=") ? route() : loadDashboard());
+$("period").addEventListener("change", () => {
+  const custom = $("period").value === "custom";
+  $("range").hidden = !custom;
+  if (custom && !$("from").value) {
+    const t = jstToday();
+    $("from").value = isoDate(jstMidnight(t.y, t.m, 1));
+    $("to").value = isoDate(jstMidnight(t.y, t.m, t.d));
+  }
+  loadDashboard();
+});
+$("from").addEventListener("change", loadDashboard);
+$("to").addEventListener("change", loadDashboard);
+$("task").addEventListener("change", loadDashboard);
+for (const button of document.querySelectorAll(".seg button")) {
+  button.addEventListener("click", () => setView(button.dataset.view));
+}
+$("more").addEventListener("click", () => loadJobs(false));
+$("back").addEventListener("click", () => { location.hash = ""; });
+window.addEventListener("hashchange", () => { if (key) route(); });
+$("download").addEventListener("click", () => {
+  if (!blobUrl || !current) return;
+  const link = el("a");
+  link.href = blobUrl;
+  link.download = current.file_name || current.job_id;
+  document.body.append(link);
+  link.click();
+  link.remove();
+});
+$("show-response").addEventListener("click", () => showTech(async () =>
+  [codeBlock(JSON.stringify(await json(jobPath(current.job_id, "response")), null, 2))]));
+$("show-process").addEventListener("click", () => showTech(async () => {
+  const snapshot = await json(jobPath(current.job_id, "process"));
+  return Object.entries(snapshot.files).flatMap(([name, text]) =>
+    [el("div", `${snapshot.name}/${name}`, "code-title"), el("pre", text, "code")]);
+}));
+
+key = loadKey();
+if (key) start().catch((error) => showLogin(error instanceof Unauthorized
+  ? "キーが正しくありません。入れ直してください。" : "読み込めませんでした：" + error.message));
+else showLogin();
+</script>
+</body>
+</html>
